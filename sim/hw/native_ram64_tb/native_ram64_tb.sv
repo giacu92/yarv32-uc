@@ -11,7 +11,7 @@ import rv32_pkg::*;
  * Exposes the master-side native signals as flat ports so the C++ BFM
  * (native_ram64_tb.cpp) can drive them directly. native_ram's ports are flat
  * parametric logic (sized by DATA_WIDTH / OUTSTANDING); this wrapper is plain
- * point-to-point wiring (no mem_req_t / mem_rsp_t structs — those are 32-bit
+ * point-to-point wiring (no cpu_mem_req_t / cpu_mem_rsp_t structs — those are 32-bit
  * only and cannot carry the 64-bit fetch word).
  *
  * Checks (in the BFM):

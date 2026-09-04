@@ -6,7 +6,7 @@ import rv32_pkg::*;
 
 /**
  * CPU top: instantiates pipeline stages AND the on-die AXI4-Lite
- * bridge that turns the native mem_req_t / mem_rsp_t into AR/AW/W +
+ * bridge that turns the native cpu_mem_req_t / cpu_mem_rsp_t into AR/AW/W +
  * R/B at the single master port.
  *
  * External view of the CPU (Harvard):
@@ -96,8 +96,8 @@ module rv32imac_zicsr_zifencei #(
     input  ifetch_rsp_t imem_rsp_i,
 
     // Native D-mem (LSU data RAM, byte-strobed).
-    output mem_req_t dmem_req_o,
-    input  mem_rsp_t dmem_rsp_i,
+    output cpu_mem_req_t dmem_req_o,
+    input  cpu_mem_rsp_t dmem_rsp_i,
 
     // Machine software-interrupt pending bit from the MSIP MMIO slave
     // (on axi_peri at the board top). Drives mip.MSIP. Read-only from CSR
@@ -132,8 +132,8 @@ module rv32imac_zicsr_zifencei #(
     ifetch_req_t                   fe_req;
     ifetch_rsp_t                   fe_rsp;
     // LSU native peri side -> the peri bridge -> axi_peri.
-    mem_req_t                      peri_req;
-    mem_rsp_t                      peri_rsp;
+    cpu_mem_req_t                  peri_req;
+    cpu_mem_rsp_t                  peri_rsp;
 
     // F/D pipeline-register taps, consumed by the decode stage below.
     wire            [    XLEN-1:0] fe_pc;
@@ -162,7 +162,7 @@ module rv32imac_zicsr_zifencei #(
     // predictor). Decode queries the PHT/RAS for the control-flow instr at the
     // buffer head; execute trains on every resolved control-flow instr. The
     // three bundles live in rv32_pkg (bp_lookup_req_t / bp_lookup_rsp_t /
-    // bp_train_t), split by direction like mem_req_t / mem_rsp_t.
+    // bp_train_t), split by direction like cpu_mem_req_t / cpu_mem_rsp_t.
     bp_lookup_req_t                bp_lookup_req;
     bp_lookup_rsp_t                bp_lookup_rsp;
     bp_push_req_t                  bp_push_req;
@@ -277,7 +277,7 @@ module rv32imac_zicsr_zifencei #(
     // -------------------------------------------------------------
     // On-die AXI4-Lite bridge (single master port)
     //
-    // Translates the native mem_req_t / mem_rsp_t into AXI4-Lite
+    // Translates the native cpu_mem_req_t / cpu_mem_rsp_t into AXI4-Lite
     // AR/AW/W + R/B. The pipeline only ever deals with one-cycle
     // request/response; the bridge owns the bus protocol. Peripheral
     // addresses flow through this bridge to the board top's peri bus.

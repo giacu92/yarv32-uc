@@ -60,14 +60,21 @@ NM := $(RISCV_PREFIX)-nm
 
 BOOTROM_SIZE  := 2048
 BOOTROM_STACK := 256
+# Link base of the ROM window, and it MUST match bootrom_link.ld's
+# ORIGIN(MEM). The linker symbols below are absolute addresses, so the
+# usage report subtracts this to get sizes; leave it stale and the report
+# prints the ROM's address instead of its occupancy (8388968/2048 bytes,
+# which is how the 0x0 -> 0x800000 relink was caught).
+BOOTROM_BASE  := 0x00800000
 
 all: usage
 
 .PHONY: usage
 usage: $(IMEM_HEX) $(DMEM_HEX) $(OBJD)
-	@$(NM) $(ELF) | awk -v total=$(BOOTROM_SIZE) -v stack=$(BOOTROM_STACK) '\
-	    $$3 == "__text_end" { text = strtonum("0x" $$1) } \
-	    $$3 == "__bss_end"  { img  = strtonum("0x" $$1) } \
+	@$(NM) $(ELF) | awk -v total=$(BOOTROM_SIZE) -v stack=$(BOOTROM_STACK) \
+	    -v base=$$(printf '%d' $(BOOTROM_BASE)) '\
+	    $$3 == "__text_end" { text = strtonum("0x" $$1) - base } \
+	    $$3 == "__bss_end"  { img  = strtonum("0x" $$1) - base } \
 	    END { \
 	        used = img + stack; \
 	        free = total - used; \

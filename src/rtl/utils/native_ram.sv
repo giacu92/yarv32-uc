@@ -10,7 +10,7 @@ import rv32_pkg::*;
  * single-outstanding) ports — no AXI. One parametric module serves both.
  *
  * The ports are FLAT parametric logic (sized by DATA_WIDTH / OUTSTANDING),
- * not the mem_req_t/mem_rsp_t packed structs: those structs are XLEN-wide
+ * not the cpu_mem_req_t/cpu_mem_rsp_t packed structs: those structs are XLEN-wide
  * (32-bit rdata/wdata/wstrb) and cannot carry the 64-bit fetch word. The
  * struct types stay on the CPU/LSU side; the top level breaks the struct
  * into these flat ports at the instantiation site.
@@ -122,7 +122,7 @@ module native_ram #(
     (* ram_style = "block" *)
     (* syn_ramstyle = "block_ram" *)
     (* syn_romstyle = "block_rom" *)
-    (* syn_noprune = 1 *)
+    //(* syn_noprune = 1 *)
     logic [DATA_W-1:0] mem[DEPTH_WORDS];
 
     initial begin

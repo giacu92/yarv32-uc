@@ -3,7 +3,7 @@
 `default_nettype none
 
 // rv32_pkg, not yarv32_cache_pkg: both sides of this module speak the CPU's
-// protocol vocabulary (mem32_req_t is the 32-bit master view, mem_req_t the
+// protocol vocabulary (cpu_mem32_req_t is the 32-bit master view, cpu_mem_req_t the
 // 64-bit bus both packages define with identical shapes), and the 32-bit
 // convention is a CPU property. cache_cntrl's ports carry the cache package's
 // expansion of the same shapes -- connections are packed-vector assignments.
@@ -49,15 +49,15 @@ module mem_width_adapter (
     input wire rstn_i,
 
     // CPU side: 32-bit data
-    input  mem32_req_t cpu_req_i,
-    output mem32_rsp_t cpu_rsp_o,
+    input  cpu_mem32_req_t cpu_req_i,
+    output cpu_mem32_rsp_t cpu_rsp_o,
 
     // Memory side: 64-bit data (cache_cntrl's I or D port)
-    output mem_req_t mem_req_o,
-    input  mem_rsp_t mem_rsp_i
+    output cpu_mem_req_t mem_req_o,
+    input  cpu_mem_rsp_t mem_rsp_i
 );
 
-    localparam int NARROW_W = MEM32_WIDTH;
+    localparam int NARROW_W = CPU_MEM32_WIDTH;
     localparam int NARROW_STRB = NARROW_W / 8;
 
     // Which half of the 64-bit word this access lives in.

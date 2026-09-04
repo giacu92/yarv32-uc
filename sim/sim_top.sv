@@ -101,8 +101,8 @@ module sim_top #(
     // native_ram.
     // -----------------------------------------------------------------
     // Fetch I-mem port is 64-bit read-only (ifetch); the LSU D-mem port
-    // rides the (64-bit-field) mem_req_t / mem_rsp_t, but the sim's D-mem
-    // is a 32-bit native_ram and the CPU is a 32-bit master on it: the
+    // rides the (64-bit-field) cpu_mem_req_t / cpu_mem_rsp_t, but the sim's
+    // D-mem is a 32-bit native_ram and the CPU is a 32-bit master on it: the
     // word/strobes sit in the low lanes of the widened fields (the cache
     // build steers them at the cache boundary, see top_module), so the
     // slices below are the whole adaptation.
@@ -111,8 +111,8 @@ module sim_top #(
     // RAM-facing side of the fetch port: u_imem drives this, the IMEM_DELAY
     // generate block below turns it into the CPU-visible imem_rsp.
     ifetch_rsp_t imem_rsp_ram;
-    mem_req_t    dmem_req;
-    mem_rsp_t    dmem_rsp;
+    cpu_mem_req_t   dmem_req;
+    cpu_mem_rsp_t   dmem_rsp;
     wire [XLEN-1:0] dmem_rdata;
     // The read-only I-mem holds BVALID low (no write-ack); sink it so the
     // port is connected (a native_ram write-ack only exists for the D-mem).

@@ -39,7 +39,7 @@ STACK_SIZE = 256;
 
 MEMORY
 {
-    MEM (rwx) : ORIGIN = 0x00000000, LENGTH = 2K
+    MEM (rwx) : ORIGIN = 0x00800000, LENGTH = 2K
 }
 
 SECTIONS
@@ -81,8 +81,8 @@ SECTIONS
      * quietly outgrew its window would be found on the board rather than here.
      * Two checks, because the two ways to overrun 2 KiB have different fixes:
      * too much code/data, or a stack with nowhere to go. */
-    ASSERT(__text_end <= BOOTROM_SIZE,
+    ASSERT(__text_end - ORIGIN(MEM) <= BOOTROM_SIZE,
            "bootrom .text does not fit in the 2 KiB boot ROM")
-    ASSERT(__bss_end + STACK_SIZE <= BOOTROM_SIZE,
+    ASSERT(__bss_end - ORIGIN(MEM) + STACK_SIZE <= BOOTROM_SIZE,
            "bootrom image + reserved stack exceeds the 2 KiB boot ROM")
 }

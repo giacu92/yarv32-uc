@@ -153,11 +153,11 @@ module execute_stage #(
     output wire bp_train_t bp_train_o,
 
     // Native memory interface (LSU): loads/stores/Zilx launch here.
-    output mem_req_t mem_req_o,
-    input  mem_rsp_t mem_rsp_i,
+    output cpu_mem_req_t mem_req_o,
+    input  cpu_mem_rsp_t mem_rsp_i,
     // Native memory interface for peripherals
-    output mem_req_t peri_req_o,
-    input  mem_rsp_t peri_rsp_i,
+    output cpu_mem_req_t peri_req_o,
+    input  cpu_mem_rsp_t peri_rsp_i,
 
     // ex_* per-stage taps (E/M register): pc / instr / valid of the retired
     // op. Named like fetch's fe_*_o (no _dbg suffix) so every pipeline stage
@@ -378,7 +378,7 @@ module execute_stage #(
     // cycle later; the D-mem launch drives its own live.
     logic     [      XLEN-1:0] mem_addr_q;
     logic     [      XLEN-1:0] mem_wdata_q;
-    logic     [STRB_WIDTH-1:0] mem_wstrb_q;
+    logic     [XLEN_STRB_W-1:0] mem_wstrb_q;
     logic                      mem_is_peri_q;
 
     // Target select, split by which cycle reads it.
@@ -397,7 +397,7 @@ module execute_stage #(
     // flop, so a peri op cannot falsely retire on the D-mem's rvalid (the bug
     // from splitting only the request side). The launch phase needs no mux:
     // each launch state talks to exactly one port.
-    mem_rsp_t                  lsu_rsp_wait;
+    cpu_mem_rsp_t                  lsu_rsp_wait;
     assign lsu_rsp_wait = is_peri_rsp ? peri_rsp_i : mem_rsp_i;
 
     // Misaligned-access LAUNCH GATE, off the LIVE effective address. Two bits
@@ -744,7 +744,7 @@ module execute_stage #(
     // Latching also shortens the response-cycle path to a flop output.
     logic [XLEN-1:0] load_shifted;
     logic [XLEN-1:0] load_data;
-    // The native rsp carries a 64-bit doubleword (MEM_WIDTH) on the cache
+    // The native rsp carries a 64-bit doubleword (CPU_MEM_WIDTH) on the cache
     // build; the LSU's 32-bit word sits in the LOW half by convention --
     // the cache build lane-steers the response at the cache boundary
     // (top_module), and the 32-bit sim D-mem drives only the low half --
@@ -875,7 +875,7 @@ module execute_stage #(
     // the forward path imposes on anything downstream of the EA. Both depend
     // on EA[1:0] only, which the EA tap delivers off the bottom of the adder's
     // carry chain rather than out of the ALU result mux.
-    logic [STRB_WIDTH-1:0] store_wstrb;
+    logic [XLEN_STRB_W-1:0] store_wstrb;
     always_comb begin
         // Byte strobes for a store of de_i.mem_size at the EA.
         unique case (de_i.mem_size)

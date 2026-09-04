@@ -42,7 +42,13 @@ package rv32_pkg;
 
 
     localparam int unsigned XLEN = 32;
-    localparam int unsigned STRB_WIDTH = XLEN / 8;
+    // Byte strobes for one XLEN word. Named XLEN_STRB_W, not STRB_WIDTH:
+    // yarv32_cache_pkg declares a STRB_WIDTH of its own worth
+    // CPU_MEM_WIDTH/8 = 8, and both packages are wildcard-imported in this
+    // design. Two identical names carrying different values is the one
+    // collision that cannot be caught by a width check -- see the native
+    // memory protocol block at the bottom of this package.
+    localparam int unsigned XLEN_STRB_W = XLEN / 8;
 
     // Core clock, and the frequency the board UART divides down to hit
     // UART_BAUD. MUST track the rPLL settings in top_module: changing one
@@ -171,7 +177,7 @@ package rv32_pkg;
     // ---------------------------------------------------------------
     localparam int unsigned PERI_ADDR_BIT = 28;
 
-    typedef logic [STRB_WIDTH-1:0] strb_t;
+    typedef logic [XLEN_STRB_W-1:0] strb_t;
 
     // ---------------------------------------------------------------
     // Native memory interface — split BY DIRECTION (AXI style): each
@@ -189,9 +195,9 @@ package rv32_pkg;
         logic                  we;      // 1 = write, 0 = read
         logic [XLEN-1:0]       addr;    // byte address
         logic [XLEN-1:0]       wdata;   // write data (ignored if we=0)
-        logic [STRB_WIDTH-1:0] wstrb;   // byte strobes; all-1 on a word store
+        logic [XLEN_STRB_W-1:0] wstrb;   // byte strobes; all-1 on a word store
         logic                  rready;  // master ready to accept read data
-    } mem_req_t;*/
+    } cpu_mem_req_t;*/
 
     // bridge -> master  (tutti gli INPUT del master)
     /*typedef struct packed {
@@ -199,16 +205,16 @@ package rv32_pkg;
         logic            rvalid;  // read data valid this cycle
         logic [XLEN-1:0] rdata;   // read data
         logic            bvalid;  // write-ack valid this cycle (store retire)
-    } mem_rsp_t;*/
+    } cpu_mem_rsp_t;*/
 
     // ---------------------------------------------------------------
     // Instruction-fetch interface — read-only, 64-bit. The I-mem port is
     // widened to deliver two 32-bit words per access (3-4 with RVC), so it
-    // cannot ride the XLEN-wide mem_req_t/mem_rsp_t (whose rdata is 32-bit).
+    // cannot ride the XLEN-wide cpu_mem_req_t/cpu_mem_rsp_t (whose rdata is 32-bit).
     // Fetch issues aligned 8-byte reads; a read has no write side, so the
     // request carries only valid/addr/rready and the response only
-    // ready/rvalid/rdata. D-mem and the peri bridge keep using mem_req_t /
-    // mem_rsp_t above.
+    // ready/rvalid/rdata. D-mem and the peri bridge keep using cpu_mem_req_t /
+    // cpu_mem_rsp_t above.
     // ---------------------------------------------------------------
     localparam int unsigned IFETCH_DW = 64;  // fetch word width (bytes 0..7)
 
@@ -226,7 +232,7 @@ package rv32_pkg;
 
     // ---------------------------------------------------------------
     // Branch-predictor interface. Three bundles, split by direction (the
-    // same convention as mem_req_t/mem_rsp_t and ifetch_req_t/ifetch_rsp_t):
+    // same convention as cpu_mem_req_t/cpu_mem_rsp_t and ifetch_req_t/ifetch_rsp_t):
     // one struct port per direction/source instead of a fan of individual
     // wires on decode / execute / the predictor. The predictor is a
     // combinational-lookup, resolve-trained block (see branch_predictor.sv).
@@ -492,7 +498,7 @@ package rv32_pkg;
 
     // D/E pipeline register: everything decode produces for a (future)
     // execute stage. Single-direction packed struct, legal as one port
-    // (matches the mem_req_t / mem_rsp_t convention).
+    // (matches the cpu_mem_req_t / cpu_mem_rsp_t convention).
     typedef struct packed {
         logic valid;  // a decoded instr is held this cycle
         logic [XLEN-1:0] pc;  // instr PC (P for low/32-bit, P+2 for upper half)
@@ -550,17 +556,43 @@ package rv32_pkg;
     } de_t;
 
 
-    // CPU-side native protocol: 64-bit data, 64-bit byte address.
-    localparam int unsigned MEM_WIDTH = 64;
+    // ---------------------------------------------------------------
+    // Native memory protocol, CPU side.
+    //
+    // Every name here is CPU_/cpu_-prefixed on purpose. yarv32_cache_pkg
+    // (the cache submodule) declares the SAME protocol with the same
+    // macros, and it is the canonical owner of the unprefixed spellings
+    // (MEM_WIDTH, STRB_WIDTH, mem_req_t, mem_rsp_t, CACHE_WIDTH,
+    // cache_req_t, ...). Both packages are wildcard-imported across this
+    // design, so a shared name is a name that resolves by tool-dependent
+    // import order rather than by declaration -- and the two disagreed on
+    // a value, not just a spelling: STRB_WIDTH is XLEN/8 = 4 here and
+    // MEM_WIDTH/8 = 8 there. sv2v refuses such a tree outright
+    // ("identifier \"mem_req_t\" ambiguously refers to the definitions in
+    // any of rv32_pkg, yarv32_cache_pkg"), which is what took the
+    // lint-yosys / gatesim paths offline. Keep this side prefixed and the
+    // two name sets stay disjoint.
+    //
+    // What is NOT declared here, deliberately: the cache-line-wide pair
+    // (CACHE_WIDTH / cache_req_t / cache_rsp_t). It described the cache's
+    // internal data macros, nothing in this repo ever read it, and the
+    // authority on a cache's own geometry is the cache package. Add it
+    // back only if CPU RTL genuinely needs to speak a line-wide bus.
+    //
+    // The `YARV_MEM_* macros above are a byte-identical copy of the ones
+    // in yarv32_cache_pkg, sharing their `ifndef YARV_MEM_TYPES_SV guard:
+    // whichever package compiles first defines them and the second skips.
+    // The copy is what lets the CPU build with no cache submodule checked
+    // out (the BSRAM / main-branch configuration). Keep the two texts
+    // identical -- the guard means a divergence would not be reported,
+    // it would just silently take whichever copy compiled first.
+    // ---------------------------------------------------------------
 
-    // Cache-line variant: one whole cache line per RAM word (2^5 = 32 B
-    // at CL_SIZE=5). Must stay consistent with cache_cntrl's
-    // DATA_WIDTH = 2**(CL_SIZE+3).
-    localparam int unsigned CACHE_WIDTH = 256;
-    localparam int unsigned CACHE_STRB_WIDTH = CACHE_WIDTH / 8;
+    // CPU-side native protocol: 64-bit data, 64-bit byte address.
+    localparam int unsigned CPU_MEM_WIDTH = 64;
 
     // Native protocol, CPU width: fetch/LSU side, bootrom.
-    `YARV_MEM_TYPES(mem_req_t, mem_rsp_t, MEM_WIDTH, MEM_WIDTH)
+    `YARV_MEM_TYPES(cpu_mem_req_t, cpu_mem_rsp_t, CPU_MEM_WIDTH, CPU_MEM_WIDTH)
 
     // Native protocol, 32-bit master view. The RV32 LSU never moves more
     // than 4 bytes, so on the 64-bit bus above it drives and reads only the
@@ -570,11 +602,8 @@ package rv32_pkg;
     // package, not yarv32_cache_pkg, because the 32-bit-master convention
     // is a CPU property; the adapter connects to cache_cntrl's ports by
     // the packed-assignment width compatibility above.
-    localparam int unsigned MEM32_WIDTH = XLEN;
-    `YARV_MEM_TYPES(mem32_req_t, mem32_rsp_t, XLEN, MEM32_WIDTH)
-
-    // Native protocol, cache-line width: cache data macros.
-    `YARV_MEM_TYPES(cache_req_t, cache_rsp_t, MEM_WIDTH, CACHE_WIDTH)
+    localparam int unsigned CPU_MEM32_WIDTH = XLEN;
+    `YARV_MEM_TYPES(cpu_mem32_req_t, cpu_mem32_rsp_t, XLEN, CPU_MEM32_WIDTH)
 
 endpackage
 

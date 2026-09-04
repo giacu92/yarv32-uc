@@ -208,11 +208,11 @@ module top_module (
     // board top needs no crossbar for memory.
     // -----------------------------------------------------------------
     // Fetch I-mem port is 64-bit read-only (ifetch); the LSU D-mem port stays
-    // on the 32-bit byte-strobed mem_req_t / mem_rsp_t.
+    // on the 32-bit byte-strobed cpu_mem_req_t / cpu_mem_rsp_t.
     ifetch_req_t imem_req;
     ifetch_rsp_t imem_rsp;
-    mem_req_t    dmem_req;
-    mem_rsp_t    dmem_rsp;
+    cpu_mem_req_t    dmem_req;
+    cpu_mem_rsp_t    dmem_rsp;
     // The read-only I-mem holds BVALID low (no write-ack); sink it so the
     // port is connected (a native_ram write-ack only exists for the D-mem).
     wire         imem_bvalid_unused;
@@ -348,7 +348,7 @@ module top_module (
     // Cache controller (I-cache + D-cache over the embedded 8 MiB SDRAM),
     // replacing the two BSRAM native_ram instances above.
     //
-    // Its ports speak the 64-bit mem_req_t / mem_rsp_t, but the CPU is a
+    // Its ports speak the 64-bit cpu_mem_req_t / cpu_mem_rsp_t, but the CPU is a
     // 32-bit master on that bus, and fetch speaks ifetch_req_t /
     // ifetch_rsp_t -- so two adapters sit here:
     //
@@ -371,12 +371,12 @@ module top_module (
     //   speaks. Zero added latency: the request path is wires, the response
     //   path one mux.
     // -----------------------------------------------------------------
-    mem_req_t  icache_req;
-    mem_rsp_t  icache_rsp;
-    mem_req_t  dcache_req;
-    mem_rsp_t  dcache_rsp;
-    mem32_req_t dmem32_req;
-    mem32_rsp_t dmem32_rsp;
+    cpu_mem_req_t  icache_req;
+    cpu_mem_rsp_t  icache_rsp;
+    cpu_mem_req_t  dcache_req;
+    cpu_mem_rsp_t  dcache_rsp;
+    cpu_mem32_req_t dmem32_req;
+    cpu_mem32_rsp_t dmem32_rsp;
 
     always_comb begin
         icache_req        = '0;
@@ -396,7 +396,7 @@ module top_module (
         dmem32_req.we     = dmem_req.we;
         dmem32_req.addr   = dmem_req.addr[XLEN-1:0];
         dmem32_req.wdata  = dmem_req.wdata[XLEN-1:0];
-        dmem32_req.wstrb  = dmem_req.wstrb[STRB_WIDTH-1:0];
+        dmem32_req.wstrb  = dmem_req.wstrb[XLEN_STRB_W-1:0];
         dmem32_req.rready = dmem_req.rready;
     end
 
@@ -429,14 +429,14 @@ module top_module (
         // macros are one line wide (DATA_WIDTH = 2**(5+3) = 256 bit). The
         // 1 KiB full-page-burst figure was rejected in the plan -- ~260
         // core cyc/miss and a bank held 5.12 us against a 7.8 us tREFI.
-        .CL_SIZE(5),
+        .CL_SIZE(4),
         // 2-way: the tag compare->hit->way-mux path is post-flop, so this
         // competes with -- but does not extend -- the CPU's critical path.
         // Go 4-way only if PnR slack allows.
         .N_WAY(2),
         // 8 KiB per cache: 128 sets x 2 ways x 32 B, the same BSRAM budget
         // as the two 16 KiB BSRAMs this replaces (16 of 46 blocks).
-        .CACHE_SIZE(13),
+        .CACHE_SIZE(14),
         // MHZ, not Hz: this parameter spaces the SDRAM refresh interval
         // (sdram_controller's CYCLES_BETWEEN_REFRESH) and sizes the
         // power-up wait counter. rv32_pkg::UART_CLK_HZ is 50_000_000 --

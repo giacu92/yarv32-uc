@@ -7,7 +7,7 @@ import rv32_pkg::*;
 /**
  * Generic AXI4-Lite master bridge.
  *
- * Sits between the CPU's native mem_req_t / mem_rsp_t interface and a
+ * Sits between the CPU's native cpu_mem_req_t / cpu_mem_rsp_t interface and a
  * master AXI4-Lite port. The native interface is split per direction
  * (stile AXI): req_i carries all master->bridge signals (valid/we/
  * addr/wdata/wstrb/rready), rsp_o carries all bridge->master signals
@@ -62,8 +62,8 @@ module axi4_lite_master_bridge (
     input wire rstn_i,
 
     // Native CPU interface
-    input  mem_req_t req_i,
-    output mem_rsp_t rsp_o,
+    input  cpu_mem_req_t req_i,
+    output cpu_mem_rsp_t rsp_o,
 
     // Master AXI4-Lite port
     axi4_lite_if.master axi
@@ -101,7 +101,7 @@ module axi4_lite_master_bridge (
 
     always_ff @(posedge clk_i) begin
         if (accept) begin
-            // The native port is 64-bit (MEM_WIDTH) on the cache build; the
+            // The native port is 64-bit (CPU_MEM_WIDTH) on the cache build; the
             // AXI4-Lite peri fabric is 32-bit and the LSU drives the low
             // lanes (a word/strb byte b of the request is field bit b), so
             // slice the low half explicitly. The truncation is intentional

@@ -1,4 +1,4 @@
-// Verilator C++ BFM for the native mem_req_t / mem_rsp_t RAM compliance
+// Verilator C++ BFM for the native cpu_mem_req_t / cpu_mem_rsp_t RAM compliance
 // test. Drives native_mem_tb as two native masters (a RW D-mem and a
 // read-only I-mem) and verifies:
 //   - RVALID is registered and held until RREADY (the key fix vs a naive

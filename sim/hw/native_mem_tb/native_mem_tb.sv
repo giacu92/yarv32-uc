@@ -10,7 +10,7 @@ import rv32_pkg::*;
  * Instantiates two native_ram slaves and exposes the master-side native
  * signals as flat ports so the C++ BFM (native_mem_tb.cpp) can drive them
  * directly. native_ram's ports are flat parametric logic (sized by
- * DATA_WIDTH / OUTSTANDING), not the mem_req_t/mem_rsp_t structs, so this
+ * DATA_WIDTH / OUTSTANDING), not the cpu_mem_req_t/cpu_mem_rsp_t structs, so this
  * wrapper is plain point-to-point wiring:
  *   - u_dmem : READ_ONLY=0 (the LSU's byte-strobed D-mem).
  *   - u_imem : READ_ONLY=1 (a 32-bit read-only port — the real I-mem is

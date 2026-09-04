@@ -11,7 +11,7 @@ import rv32_pkg::*;
 // these ops). MUL is single-cycle (GowinSynthesis infers a DSP from the
 // '*' operator). DIV/REM are multi-cycle (restoring division, 32
 // iterations) behind a start/done handshake, in the same style as
-// mem_req_t/mem_rsp_t: the master launches with start_i, the unit answers
+// cpu_mem_req_t/cpu_mem_rsp_t: the master launches with start_i, the unit answers
 // with result_valid_o.
 //
 // Zilx: the ALU only computes the indexed load's effective address:
@@ -43,7 +43,7 @@ module alu #(
 
     input wire [XLEN-1:0] operand_a_i,
     input wire [XLEN-1:0] operand_b_i,
-    input wire alu_op_t alu_op_i,  // enum port: needs explicit net type under `default_nettype none` (EX3094); struct ports (de_t/mem_req_t) auto-resolve to var, enum does not
+    input wire alu_op_t alu_op_i,  // enum port: needs explicit net type under `default_nettype none` (EX3094); struct ports (de_t/cpu_mem_req_t) auto-resolve to var, enum does not
     input wire [1:0] shamt_i,  // Zilx index scale (log2 size, 0 unscaled)
 
     // result_valid_o / result_o are driven procedurally in the final

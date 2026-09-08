@@ -102,14 +102,18 @@ package rv32_pkg;
     // ---------------------------------------------------------------
     // Peripheral address map. These are the single source of truth for
     // the peri xbar windows: the board top and the sim top pass them to
-    // axi4_lite_xbar_3 as BASE0/BASE1/BASE2 rather than repeating
-    // literals, so the map cannot drift between the two.
+    // the peri xbar (axi4_lite_xbar_3 in sim, axi4_lite_xbar_4 on the
+    // board, which adds the SDIO window) as BASE0..BASEn rather than
+    // repeating literals, so the map cannot drift between the two.
     //
     //   0x1000_0000 .. 0x1000_0FFF  UART   (axi4_lite_uart)
     //   0x1000_1000 .. 0x1000_2FFF  CLINT  (clint_timer)
     //   0x1000_3000 .. 0x1000_3FFF  MSIP   (msip_peri)
+    //   0x1000_4000 .. 0x1000_4FFF  SDIO   (sdspi_axi_wrap, board only)
     //
     // MSIP_PERI_ADDR: a write of bit[0] sets/clears mip.MSIP.
+    // SDIO_BASE: ZipCPU sdspi SDIO controller, AXI-Lite control port
+    // (no DMA). Board-only -- sim_top keeps its own 1->3 xbar without it.
     // ---------------------------------------------------------------
     localparam logic [XLEN-1:0] UART_BASE = 32'h1000_0000;
     localparam logic [XLEN-1:0] UART_SIZE = 32'h0000_1000;
@@ -117,6 +121,8 @@ package rv32_pkg;
     localparam logic [XLEN-1:0] MTIMER_SIZE = 32'h0000_2000;
     localparam logic [XLEN-1:0] MSIP_PERI_ADDR = 32'h1000_3000;
     localparam logic [XLEN-1:0] MSIP_PERI_SIZE = 32'h0000_1000;
+    localparam logic [XLEN-1:0] SDIO_BASE = 32'h1000_4000;
+    localparam logic [XLEN-1:0] SDIO_SIZE = 32'h0000_1000;
 
     // ---------------------------------------------------------------
     // Bus address decode. The LSU steers its own accesses on
@@ -130,8 +136,8 @@ package rv32_pkg;
     // LSU or the board top.
     //
     // NOTE: the whole 0x1000_0000..0x1FFF_FFFF region routes to the peri
-    // bus, but only the three windows above are mapped. An access to the
-    // gap gets a DECERR (SLVERR) from axi4_lite_xbar_3, not a hang.
+    // bus, but only the windows above are mapped. An access to the gap
+    // gets a DECERR (SLVERR) from the peri xbar, not a hang.
     // ---------------------------------------------------------------
     localparam int unsigned PERI_ADDR_BIT = 28;
 

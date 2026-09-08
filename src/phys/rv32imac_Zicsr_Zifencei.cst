@@ -25,6 +25,22 @@ IO_PORT "uart_txd_o" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
 IO_LOC "uart_rxd_i" 70;
 IO_PORT "uart_rxd_i" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
 
+// Onboard microSD card slot (Tang Nano 20k v1.3 schematic, bank 2, 3.3V).
+// SDIO 4-bit mode. CMD and DAT lines are open-drain / idle high -> pull up.
+// Pin mapping: DAT2=80, DAT3=81, CMD=82, CLK=83, DAT0=84, DAT1=85.
+IO_LOC "sd_dat_io[2]" 80;
+IO_PORT "sd_dat_io[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+IO_LOC "sd_dat_io[3]" 81;
+IO_PORT "sd_dat_io[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+IO_LOC "sd_cmd_io" 82;
+IO_PORT "sd_cmd_io" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+IO_LOC "sd_clk_o" 83;
+IO_PORT "sd_clk_o" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "sd_dat_io[0]" 84;
+IO_PORT "sd_dat_io[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+IO_LOC "sd_dat_io[1]" 85;
+IO_PORT "sd_dat_io[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+
 // 25 MHz reference clock from the MS5351M clock generator (crystal-fed).
 // The MS5351M outputs three independent single-ended CMOS clocks; CLK0
 // is routed to PIN10. Used as a plain 3.3V LVCMOS33 input — no

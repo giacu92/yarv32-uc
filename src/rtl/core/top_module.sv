@@ -15,21 +15,22 @@ import rv32_pkg::*;
  *      v                      v                              v
  *   native_ram (u_imem)   native_ram (u_dmem)         axi_bus_peri
  *   (instr)                (data + .rodata + stack)      |
- *                                                        +-- axi4_lite_xbar_3
- *                                                        |     (peri 1->3,
+ *                                                        +-- axi4_lite_xbar_4
+ *                                                        |     (peri 1->4,
  *                                                        |      base+size)
  *                                                        |
  *                            0x1000_0000..0FFF ----------+--> uart_i  (UART)
  *                            0x1000_1000..2FFF ----------+--> u_timer (CLINT)
  *                            0x1000_3000..3FFF ----------+--> u_msip  (MSIP)
+ *                            0x1000_4000..4FFF ----------+--> u_sdio  (SDIO)
  *
  *   Fetch and the LSU no longer contend: each has a dedicated native
  *   BSRAM port. AXI survives only for peripherals (the peri bridge is
  *   inside the CPU). The board top is pure point-to-point wires — the
  *   LSU steers addr[PERI_ADDR_BIT] internally, and the peri xbar here
- *   splits the peri bus into UART / CLINT timer / MSIP by base+size.
+ *   splits the peri bus into UART / CLINT timer / MSIP / SDIO by base+size.
  *   The window bases come from rv32_pkg (UART_BASE / MTIMER_BASE /
- *   MSIP_PERI_ADDR) so the map is defined in exactly one place.
+ *   MSIP_PERI_ADDR / SDIO_BASE) so the map is defined in exactly one place.
  *
  * Pin assignments are in impl/pnr/rv32imac_Zicsr_Zifencei.cst.
  *
@@ -53,6 +54,13 @@ module top_module (
     // UART
     input  wire uart_rxd_i,
     output wire uart_txd_o,
+
+    // microSD card slot (Tang Nano 20k onboard, PIN80..85, bank 2).
+    // SDIO 4-bit mode: CLK + CMD + DAT0..DAT3. Pin assignments in
+    // src/phys/rv32imac_Zicsr_Zifencei.cst.
+    output wire       sd_clk_o,
+    inout  wire       sd_cmd_io,
+    inout  wire [3:0] sd_dat_io,
 
     // Debug LEDs: led_o[0] = stall indicator, led_o[3:1] = alive counter.
     output wire [3:0] led_o
@@ -163,15 +171,17 @@ module top_module (
     // -----------------------------------------------------------------
     // AXI4-Lite buses (trunk modport).
     //
-    //   axi_bus_peri  : CPU peri master -> peri xbar (1->3, base+size decode).
+    //   axi_bus_peri  : CPU peri master -> peri xbar (1->4, base+size decode).
     //   axi_bus_uart  : xbar m0 -> UART  slave (UART_BASE      0x1000_0000).
     //   axi_bus_timer : xbar m1 -> timer slave (MTIMER_BASE    0x1000_1000).
     //   axi_bus_msip  : xbar m2 -> MSIP  slave (MSIP_PERI_ADDR 0x1000_3000).
+    //   axi_bus_sdio  : xbar m3 -> SDIO  slave (SDIO_BASE      0x1000_4000).
     // -----------------------------------------------------------------
     axi4_lite_if axi_bus_peri ();
     axi4_lite_if axi_bus_msip ();
     axi4_lite_if axi_bus_timer ();
     axi4_lite_if axi_bus_uart ();
+    axi4_lite_if axi_bus_sdio ();
 
     // Single clock domain: the whole fabric (CPU bridge, memories, the
     // buses) runs on clk_core / rstn_core. There is NO clock-domain
@@ -185,6 +195,8 @@ module top_module (
     assign axi_bus_timer.aresetn = rstn_core;
     assign axi_bus_uart.aclk     = clk_core;
     assign axi_bus_uart.aresetn  = rstn_core;
+    assign axi_bus_sdio.aclk     = clk_core;
+    assign axi_bus_sdio.aresetn  = rstn_core;
 
     // Debug tap: decode or execute stage stall.
     wire         dbg_stall;
@@ -316,29 +328,50 @@ module top_module (
     );
 
     // -----------------------------------------------------------------
-    // Peripheral bus: 1->3 address-decode mux splitting the peri bus into
-    // the UART, the CLINT timer and the MSIP slave by base+size.
-    // Single-outstanding pass-through (the CPU bridge is single-outstanding
-    // overall). An address in the peri region matching no window is completed
-    // with a DECERR by the xbar's terminator, not left to hang.
+    // Peripheral bus: 1->4 address-decode mux splitting the peri bus into
+    // the UART, the CLINT timer, the MSIP slave and the SDIO controller by
+    // base+size. Single-outstanding pass-through (the CPU bridge is
+    // single-outstanding overall). An address in the peri region matching
+    // no window is completed with a DECERR by the xbar's terminator, not
+    // left to hang.
     //   m0 UART_BASE      (0x1000_0000, 4 KiB)
     //   m1 MTIMER_BASE    (0x1000_1000, 8 KiB)
     //   m2 MSIP_PERI_ADDR (0x1000_3000, 4 KiB)
+    //   m3 SDIO_BASE      (0x1000_4000, 4 KiB)
     // -----------------------------------------------------------------
-    axi4_lite_xbar_3 #(
+    axi4_lite_xbar_4 #(
         .BASE0(rv32_pkg::UART_BASE),
         .SIZE0(rv32_pkg::UART_SIZE),
         .BASE1(rv32_pkg::MTIMER_BASE),
         .SIZE1(rv32_pkg::MTIMER_SIZE),
         .BASE2(rv32_pkg::MSIP_PERI_ADDR),
-        .SIZE2(rv32_pkg::MSIP_PERI_SIZE)
+        .SIZE2(rv32_pkg::MSIP_PERI_SIZE),
+        .BASE3(rv32_pkg::SDIO_BASE),
+        .SIZE3(rv32_pkg::SDIO_SIZE)
     ) u_peri_xbar (
         .clk_i (clk_core),
         .rstn_i(rstn_core),
         .s_axi (axi_bus_peri.slave),
         .m0_axi(axi_bus_uart.master),
         .m1_axi(axi_bus_timer.master),
-        .m2_axi(axi_bus_msip.master)
+        .m2_axi(axi_bus_msip.master),
+        .m3_axi(axi_bus_sdio.master)
+    );
+
+    // -----------------------------------------------------------------
+    // SDIO controller (ZipCPU sdspi, AXI-Lite control, no DMA) -> onboard
+    // microSD slot. See sdspi_axi_wrap.sv for the configuration and tie-offs.
+    // sd_int is left dangling for now (OR into meip when an SD IRQ wanted).
+    // -----------------------------------------------------------------
+    wire sd_int;
+    sdspi_axi_wrap u_sdio (
+        .clk_i    (clk_core),
+        .rstn_i   (rstn_core),
+        .s_axi    (axi_bus_sdio.slave),
+        .sd_clk_o (sd_clk_o),
+        .sd_cmd_io(sd_cmd_io),
+        .sd_dat_io(sd_dat_io),
+        .sd_int_o (sd_int)
     );
 
     // -----------------------------------------------------------------

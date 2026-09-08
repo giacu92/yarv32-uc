@@ -5,10 +5,13 @@
     <Version>5</Version>
     <Device name="GW2AR-18C" pn="GW2AR-LV18QN88C8/I7">gw2ar18c-000</Device>
     <FileList>
+        <File path="src/rtl/utils/sdspi_defs.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/pkg/rv32_pkg.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/bus/axi4_lite_if.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/bus/axi4_lite_master_bridge.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/bus/axi4_lite_xbar.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/bus/axi4_lite_xbar_3.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/bus/axi4_lite_xbar_4.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/fetch_stage.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/reg_file.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/csr_regfile.sv" type="file.verilog" enable="1"/>
@@ -19,11 +22,31 @@
         <File path="src/rtl/core/execute_stage.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/rv32imac_zicsr_zifencei.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/top_module.sv" type="file.verilog" enable="1"/>
-        <File path="src/rtl/pkg/rv32_pkg.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/utils/native_ram.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/utils/msip_peri.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/utils/clint_timer.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/utils/axi4_lite_uart.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/utils/sdspi_axi_wrap.sv" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/sdio/sdio_top.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/sdio/sdio.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/sdio/sdaxil.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/sdio/sdwb.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/sdio/sdckgen.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/sdio/sdcmd.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/sdio/sdrxframe.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/sdio/sdtxframe.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/sdio/sdfrontend.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/sdio/sddma.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/sdio/sdax_mm2s.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/sdio/sdax_s2mm.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/sddma_mm2s.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/sddma_s2mm.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/sddma_rxgears.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/sddma_txgears.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/afifo.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/sdfifo.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/rtl/sdskid.v" type="file.verilog" enable="1"/>
+        <File path="src/ips/sdspi/bench/verilog/IOBUF.v" type="file.verilog" enable="1"/>
         <File path="src/phys/rv32imac_Zicsr_Zifencei.cst" type="file.cst" enable="1"/>
         <File path="src/phys/rv32imac_Zicsr_Zifencei.sdc" type="file.sdc" enable="1"/>
     </FileList>

@@ -13,7 +13,6 @@
 # not instantiated by sim_top (Harvard uses native_ram); it is exercised by
 # the standalone sim/hw/ram_tb build, which has its own VSRC.
 RTL := \
-	../src/rtl/core/top_module.sv \
 	../src/rtl/pkg/rv32_pkg.sv \
 	../src/rtl/bus/axi4_lite_if.sv \
 	../src/rtl/bus/axi4_lite_master_bridge.sv \

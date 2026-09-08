@@ -13,8 +13,8 @@
 # not instantiated by sim_top (Harvard uses native_ram); it is exercised by
 # the standalone sim/hw/ram_tb build, which has its own VSRC.
 RTL := \
-	../src/rtl/core/top_module.sv \
 	../src/rtl/pkg/rv32_pkg.sv \
+	../src/rtl/core/top_module.sv \
 	../src/rtl/bus/axi4_lite_if.sv \
 	../src/rtl/bus/axi4_lite_master_bridge.sv \
 	../src/rtl/bus/axi4_lite_xbar.sv \
@@ -247,11 +247,11 @@ regress: $(TOP)
 #                     own .text, i.e. from the I-mem, through a data load.
 #                     Cases 2-5 and 8-30 (every actual RVC encoding) pass.
 #   rv32mi-pmpaddr    No PMP.
-#   rv32mi-instret_overflow  Fails at case 3: mcycleh / minstreth (the upper
-#                     halves RV32 mandates) are not implemented, so a write to
-#                     minstreth neither lands nor suppresses that
-#                     instruction's count. This is the one entry in the list
-#                     that is a genuine gap rather than a design choice.
+# (Previously rv32mi-instret_overflow was expected-fail at case 3: the
+#  RV32-mandated mcycleh / minstreth upper halves were unimplemented. They
+#  are now implemented as the high halves of 64-bit counters with carry,
+#  and a write to minstreth suppresses that instruction's minstret
+#  increment; the test now passes. See csr_regfile.sv.)
 COMPLIANCE_DIR  := sw/compliance
 COMPLIANCE_MAXC ?= 100000
 
@@ -259,8 +259,7 @@ COMPLIANCE_XFAIL := \
 	rv32ui-fence_i:539 \
 	rv32ui-ma_data:539 \
 	rv32uc-rvc:d \
-	rv32mi-pmpaddr:3 \
-	rv32mi-instret_overflow:7
+	rv32mi-pmpaddr:3
 
 compliance: $(TOP)
 	@builds=$$(ls -d $(COMPLIANCE_DIR)/build/*/ 2>/dev/null); \

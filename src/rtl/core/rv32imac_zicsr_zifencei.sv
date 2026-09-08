@@ -230,6 +230,7 @@ module rv32imac_zicsr_zifencei #(
     wire [XLEN-1:0] ex_pc;
     wire [XLEN-1:0] ex_instr;
     wire            ex_valid;
+    wire            ex_retire;  // combinational retire -> minstret counter
 
     // ===================================================================
     // Module instantiations
@@ -331,7 +332,7 @@ module rv32imac_zicsr_zifencei #(
         .mstatus_o     (csr_mstatus),
         .mip_o         (csr_mip),
         .mie_o         (csr_mie),
-        .instr_retire_i(ex_valid)
+        .instr_retire_i(ex_retire)
     );
 
     // Trap unit (combinational peer of the execute stage): consumes the
@@ -446,7 +447,8 @@ module rv32imac_zicsr_zifencei #(
         .trap_pc_o           (trap_pc),
         .ex_pc_o             (ex_pc),
         .ex_instr_o          (ex_instr),
-        .ex_valid_o          (ex_valid)
+        .ex_valid_o          (ex_valid),
+        .retire_o            (ex_retire)
     );
 
     // Branch predictor (gshare PHT + GHR + RAS). Decode queries it for the

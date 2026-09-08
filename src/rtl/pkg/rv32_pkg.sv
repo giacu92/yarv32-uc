@@ -449,9 +449,11 @@ package rv32_pkg;
         CSR_ADDR_MEPC     = 12'h341,
         CSR_ADDR_MCAUSE   = 12'h342,
         CSR_ADDR_MTVAL    = 12'h343,
-        CSR_ADDR_MIP      = 12'h344,
-        CSR_ADDR_MCYCLE   = 12'hB00,
-        CSR_ADDR_MINSTRET = 12'hB02
+        CSR_ADDR_MIP       = 12'h344,
+        CSR_ADDR_MCYCLE    = 12'hB00,
+        CSR_ADDR_MCYCLEH   = 12'hB80,
+        CSR_ADDR_MINSTRET  = 12'hB02,
+        CSR_ADDR_MINSTRETH = 12'hB82
     } csr_addr_t;
 
     // D/E pipeline register: everything decode produces for a (future)

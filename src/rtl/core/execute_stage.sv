@@ -164,7 +164,8 @@ module execute_stage #(
     // exposes a uniform pc / instr / valid output.
     output wire [XLEN-1:0] ex_pc_o,
     output wire [XLEN-1:0] ex_instr_o,
-    output wire            ex_valid_o
+    output wire            ex_valid_o,
+    output wire            retire_o
 );
 
     // =================================================================
@@ -1252,6 +1253,20 @@ module execute_stage #(
     assign ex_pc_o       = ex_pc_q;
     assign ex_instr_o    = ex_instr_q;
     assign ex_valid_o    = ex_valid_q;
+
+    // Combinational retire pulse (same cycle as op_commits / wb_early).
+    // Drives the minstret counter so a CSR write and the writer's own retire
+    // increment land in the SAME cycle -- letting the write suppress the
+    // increment (RISC-V: a write to minstret/minstreth suppresses that
+    // instruction's count). ex_valid_q above is the same retire delayed one
+    // cycle for the sim retire log (pc/instr alignment); using it for the
+    // counter put the write and the increment in different cycles, so the
+    // suppression missed and a normal instruction's increment landed one
+    // cycle too late for the registered CSR read to see (rv32mi-
+    // instret_overflow case 3). op_commits already excludes traps and
+    // redirects and includes mret, so the count set is unchanged -- only
+    // its timing relative to the log shifts.
+    assign retire_o      = op_commits;
 
     // WFI halt next-state: set when WFI retires, cleared as soon as an
     // interrupt is pending+enabled. wfi_next_pc holds the return PC for the

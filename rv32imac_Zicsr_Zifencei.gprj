@@ -1,30 +1,30 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version="1" encoding="UTF-8"?>
 <!DOCTYPE gowin-fpga-project>
 <Project>
     <Template>FPGA</Template>
     <Version>5</Version>
     <Device name="GW2AR-18C" pn="GW2AR-LV18QN88C8/I7">gw2ar18c-000</Device>
     <FileList>
-        <File path="src/rtl/pkg/rv32_pkg.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/bus/axi4_lite_if.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/bus/axi4_lite_master_bridge.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/bus/axi4_lite_xbar.sv" type="file.verilog" enable="1"/>
-        <File path="src/rtl/core/fetch_stage.sv" type="file.verilog" enable="1"/>
-        <File path="src/rtl/core/reg_file.sv" type="file.verilog" enable="1"/>
-        <File path="src/rtl/core/csr_regfile.sv" type="file.verilog" enable="1"/>
-        <File path="src/rtl/core/decode_stage.sv" type="file.verilog" enable="1"/>
-        <File path="src/rtl/core/trap_unit.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/alu.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/branch_predictor.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/core/csr_regfile.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/core/decode_stage.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/execute_stage.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/core/fetch_stage.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/core/reg_file.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/rv32imac_zicsr_zifencei.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/top_module.sv" type="file.verilog" enable="1"/>
-        <File path="src/rtl/utils/native_ram.sv" type="file.verilog" enable="1"/>
-        <File path="src/rtl/utils/msip_peri.sv" type="file.verilog" enable="1"/>
-        <File path="src/rtl/utils/clint_timer.sv" type="file.verilog" enable="1"/>
-        <File path="src/rtl/utils/axi4_lite_uart.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/core/trap_unit.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/pkg/rv32_pkg.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/utils/axi4_lite_i2c.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/utils/axi4_lite_spi.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/utils/axi4_lite_uart.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/utils/clint_timer.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/utils/msip_peri.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/utils/native_ram.sv" type="file.verilog" enable="1"/>
         <File path="src/phys/rv32imac_Zicsr_Zifencei.cst" type="file.cst" enable="1"/>
         <File path="src/phys/rv32imac_Zicsr_Zifencei.sdc" type="file.sdc" enable="1"/>
     </FileList>

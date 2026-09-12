@@ -114,10 +114,9 @@ module sim_top #(
     wire         msip;
     wire         mtip;
     // Machine external interrupt: OR of the peripheral level IRQs, same
-    // term as the board top (UART | I2C | SPI; the board's SDIO int is
-    // dangling and the sim has no SD target at all). The I2C/SPI IRQs
-    // reset deasserted, so they never raise meip unless a test enables
-    // them through MMIO.
+    // term as the board top (UART | I2C | SPI). The I2C/SPI IRQs reset
+    // deasserted, so they never raise meip unless a test enables them
+    // through MMIO.
     wire         uart_irq;
     wire         i2c_irq;
     wire         spi_irq;
@@ -258,8 +257,7 @@ module sim_top #(
     // -----------------------------------------------------------------
     // Peripheral bus: parametric peri xbar (base+size decode) feeding the
     // UART, CLINT timer, MSIP, I2C and SPI MMIO slaves, mirroring the board
-    // top (the board adds the SDIO target as window 3; the sim has no SD
-    // card, so its windows are shifted down by one above MSIP).
+    // top, which now has the same five windows.
     // The xbar's target side is flat vectors (see axi4_lite_xbar.sv for
     // why), so each slave's axi4_lite_if instance is glued to its bit
     // with plain assigns: payload broadcast, handshakes bit i = target i.

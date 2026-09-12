@@ -22,7 +22,6 @@ import rv32_pkg::*;
  *                            0x1000_0000..0FFF ----------+--> uart_i  (UART)
  *                            0x1000_1000..2FFF ----------+--> u_timer (CLINT)
  *                            0x1000_3000..3FFF ----------+--> u_msip  (MSIP)
- *                            0x1000_4000..4FFF ----------+--> u_sdio  (SDIO)
  *                            0x1000_5000..5FFF ----------+--> u_i2c   (I2C)
  *                            0x1000_6000..6FFF ----------+--> u_spi   (SPI)
  *
@@ -30,9 +29,9 @@ import rv32_pkg::*;
  *   BSRAM port. AXI survives only for peripherals (the peri bridge is
  *   inside the CPU). The board top is pure point-to-point wires — the
  *   LSU steers addr[PERI_ADDR_BIT] internally, and the peri xbar here
- *   splits the peri bus into UART / CLINT timer / MSIP / SDIO / I2C / SPI
+ *   splits the peri bus into UART / CLINT timer / MSIP / I2C / SPI
  *   by base+size. The window bases come from rv32_pkg (UART_BASE /
- *   MTIMER_BASE / MSIP_PERI_ADDR / SDIO_BASE / I2C_BASE / SPI_BASE) so the
+ *   MTIMER_BASE / MSIP_PERI_ADDR / I2C_BASE / SPI_BASE) so the
  *   map is defined in exactly one place.
  *
  * Pin assignments are in impl/pnr/rv32imac_Zicsr_Zifencei.cst.
@@ -57,13 +56,6 @@ module top_module (
     // UART
     input  wire uart_rxd_i,
     output wire uart_txd_o,
-
-    // microSD card slot (Tang Nano 20k onboard, PIN80..85, bank 2).
-    // SDIO 4-bit mode: CLK + CMD + DAT0..DAT3. Pin assignments in
-    // src/phys/rv32imac_Zicsr_Zifencei.cst.
-    output wire       sd_clk_o,
-    inout  wire       sd_cmd_io,
-    inout  wire [3:0] sd_dat_io,
 
     // I2C master (open-drain: the pin is driven low or released; external
     // pull-ups hold the lines high). Pin assignments in the .cst.
@@ -191,19 +183,17 @@ module top_module (
     // -----------------------------------------------------------------
     // AXI4-Lite buses (trunk modport).
     //
-    //   axi_bus_peri  : CPU peri master -> peri xbar (1->6, base+size decode).
+    //   axi_bus_peri  : CPU peri master -> peri xbar (1->5, base+size decode).
     //   axi_bus_uart  : xbar m0 -> UART  slave (UART_BASE      0x1000_0000).
     //   axi_bus_timer : xbar m1 -> timer slave (MTIMER_BASE    0x1000_1000).
     //   axi_bus_msip  : xbar m2 -> MSIP  slave (MSIP_PERI_ADDR 0x1000_3000).
-    //   axi_bus_sdio  : xbar m3 -> SDIO  slave (SDIO_BASE      0x1000_4000).
-    //   axi_bus_i2c   : xbar m4 -> I2C   slave (I2C_BASE       0x1000_5000).
-    //   axi_bus_spi   : xbar m5 -> SPI   slave (SPI_BASE       0x1000_6000).
+    //   axi_bus_i2c   : xbar m3 -> I2C   slave (I2C_BASE       0x1000_5000).
+    //   axi_bus_spi   : xbar m4 -> SPI   slave (SPI_BASE       0x1000_6000).
     // -----------------------------------------------------------------
     axi4_lite_if axi_bus_peri ();
     axi4_lite_if axi_bus_msip ();
     axi4_lite_if axi_bus_timer ();
     axi4_lite_if axi_bus_uart ();
-    axi4_lite_if axi_bus_sdio ();
     axi4_lite_if axi_bus_i2c ();
     axi4_lite_if axi_bus_spi ();
 
@@ -219,8 +209,6 @@ module top_module (
     assign axi_bus_timer.aresetn = rstn_core;
     assign axi_bus_uart.aclk     = clk_core;
     assign axi_bus_uart.aresetn  = rstn_core;
-    assign axi_bus_sdio.aclk     = clk_core;
-    assign axi_bus_sdio.aresetn  = rstn_core;
     assign axi_bus_i2c.aclk      = clk_core;
     assign axi_bus_i2c.aresetn   = rstn_core;
     assign axi_bus_spi.aclk      = clk_core;
@@ -249,7 +237,7 @@ module top_module (
     wire         mtip;
 
     // Machine external interrupt: OR of the peripheral level IRQs (UART,
-    // I2C, SPI; the sdspi sd_int is left dangling for now). The IRQs reset
+    // I2C, SPI). The IRQs reset
     // deasserted (peripheral IE registers reset 0), so an unconfigured
     // peripheral never raises meip. Swap in a PLIC when cause IDs matter.
     wire         uart_irq;
@@ -360,8 +348,8 @@ module top_module (
 
     // -----------------------------------------------------------------
     // Peripheral bus: parametric address-decode xbar (1->N) splitting the
-    // peri bus into the UART, the CLINT timer, the MSIP slave and the
-    // SDIO controller by base+size. Single-outstanding pass-through (the
+    // peri bus into the UART, the CLINT timer, the MSIP slave, the I2C
+    // master and the SPI master by base+size. Single-outstanding pass-through (the
     // CPU bridge is single-outstanding overall). An address in the peri
     // region matching no window is completed with a DECERR by the xbar's
     // terminator, not left to hang.
@@ -373,11 +361,12 @@ module top_module (
     //   window 0 -> axi_bus_uart  (UART_BASE      0x1000_0000, 4 KiB)
     //   window 1 -> axi_bus_timer (MTIMER_BASE    0x1000_1000, 8 KiB)
     //   window 2 -> axi_bus_msip  (MSIP_PERI_ADDR 0x1000_3000, 4 KiB)
-    //   window 3 -> axi_bus_sdio  (SDIO_BASE      0x1000_4000, 4 KiB)
-    //   window 4 -> axi_bus_i2c   (I2C_BASE       0x1000_5000, 4 KiB)
-    //   window 5 -> axi_bus_spi   (SPI_BASE       0x1000_6000, 4 KiB)
+    //   window 3 -> axi_bus_i2c   (I2C_BASE       0x1000_5000, 4 KiB)
+    //   window 4 -> axi_bus_spi   (SPI_BASE       0x1000_6000, 4 KiB)
+    // 0x1000_4000 is unmapped (it held the SDIO controller until it was
+    // dropped from this branch); an access there gets a DECERR.
     // -----------------------------------------------------------------
-    localparam int unsigned PERI_N = 6;
+    localparam int unsigned PERI_N = 5;
 
     logic [         31:0] peri_awaddr;
     logic [         31:0] peri_wdata;
@@ -402,7 +391,6 @@ module top_module (
         .BASES({
             rv32_pkg::SPI_BASE,
             rv32_pkg::I2C_BASE,
-            rv32_pkg::SDIO_BASE,
             rv32_pkg::MSIP_PERI_ADDR,
             rv32_pkg::MTIMER_BASE,
             rv32_pkg::UART_BASE
@@ -410,7 +398,6 @@ module top_module (
         .SIZES({
             rv32_pkg::SPI_SIZE,
             rv32_pkg::I2C_SIZE,
-            rv32_pkg::SDIO_SIZE,
             rv32_pkg::MSIP_PERI_SIZE,
             rv32_pkg::MTIMER_SIZE,
             rv32_pkg::UART_SIZE
@@ -495,78 +482,43 @@ module top_module (
     assign peri_rresp[4+:2]      = axi_bus_msip.rresp;
     assign peri_rdata[64+:32]    = axi_bus_msip.rdata;
 
-    // Window 3: SDIO controller.
-    assign axi_bus_sdio.awaddr   = peri_awaddr;
-    assign axi_bus_sdio.wdata    = peri_wdata;
-    assign axi_bus_sdio.wstrb    = peri_wstrb;
-    assign axi_bus_sdio.araddr   = peri_araddr;
-    assign axi_bus_sdio.awvalid  = peri_awvalid[3];
-    assign axi_bus_sdio.wvalid   = peri_wvalid[3];
-    assign axi_bus_sdio.bready   = peri_bready[3];
-    assign axi_bus_sdio.arvalid  = peri_arvalid[3];
-    assign axi_bus_sdio.rready   = peri_rready[3];
-    assign peri_awready[3]       = axi_bus_sdio.awready;
-    assign peri_wready[3]        = axi_bus_sdio.wready;
-    assign peri_bvalid[3]        = axi_bus_sdio.bvalid;
-    assign peri_arready[3]       = axi_bus_sdio.arready;
-    assign peri_rvalid[3]        = axi_bus_sdio.rvalid;
-    assign peri_bresp[6+:2]      = axi_bus_sdio.bresp;
-    assign peri_rresp[6+:2]      = axi_bus_sdio.rresp;
-    assign peri_rdata[96+:32]    = axi_bus_sdio.rdata;
-
-    // Window 4: I2C.
+    // Window 3: I2C.
     assign axi_bus_i2c.awaddr    = peri_awaddr;
     assign axi_bus_i2c.wdata     = peri_wdata;
     assign axi_bus_i2c.wstrb     = peri_wstrb;
     assign axi_bus_i2c.araddr    = peri_araddr;
-    assign axi_bus_i2c.awvalid   = peri_awvalid[4];
-    assign axi_bus_i2c.wvalid    = peri_wvalid[4];
-    assign axi_bus_i2c.bready    = peri_bready[4];
-    assign axi_bus_i2c.arvalid   = peri_arvalid[4];
-    assign axi_bus_i2c.rready    = peri_rready[4];
-    assign peri_awready[4]       = axi_bus_i2c.awready;
-    assign peri_wready[4]        = axi_bus_i2c.wready;
-    assign peri_bvalid[4]        = axi_bus_i2c.bvalid;
-    assign peri_arready[4]       = axi_bus_i2c.arready;
-    assign peri_rvalid[4]        = axi_bus_i2c.rvalid;
-    assign peri_bresp[8+:2]      = axi_bus_i2c.bresp;
-    assign peri_rresp[8+:2]      = axi_bus_i2c.rresp;
-    assign peri_rdata[128+:32]   = axi_bus_i2c.rdata;
+    assign axi_bus_i2c.awvalid   = peri_awvalid[3];
+    assign axi_bus_i2c.wvalid    = peri_wvalid[3];
+    assign axi_bus_i2c.bready    = peri_bready[3];
+    assign axi_bus_i2c.arvalid   = peri_arvalid[3];
+    assign axi_bus_i2c.rready    = peri_rready[3];
+    assign peri_awready[3]       = axi_bus_i2c.awready;
+    assign peri_wready[3]        = axi_bus_i2c.wready;
+    assign peri_bvalid[3]        = axi_bus_i2c.bvalid;
+    assign peri_arready[3]       = axi_bus_i2c.arready;
+    assign peri_rvalid[3]        = axi_bus_i2c.rvalid;
+    assign peri_bresp[6+:2]      = axi_bus_i2c.bresp;
+    assign peri_rresp[6+:2]      = axi_bus_i2c.rresp;
+    assign peri_rdata[96+:32]    = axi_bus_i2c.rdata;
 
-    // Window 5: SPI.
+    // Window 4: SPI.
     assign axi_bus_spi.awaddr    = peri_awaddr;
     assign axi_bus_spi.wdata     = peri_wdata;
     assign axi_bus_spi.wstrb     = peri_wstrb;
     assign axi_bus_spi.araddr    = peri_araddr;
-    assign axi_bus_spi.awvalid   = peri_awvalid[5];
-    assign axi_bus_spi.wvalid    = peri_wvalid[5];
-    assign axi_bus_spi.bready    = peri_bready[5];
-    assign axi_bus_spi.arvalid   = peri_arvalid[5];
-    assign axi_bus_spi.rready    = peri_rready[5];
-    assign peri_awready[5]       = axi_bus_spi.awready;
-    assign peri_wready[5]        = axi_bus_spi.wready;
-    assign peri_bvalid[5]        = axi_bus_spi.bvalid;
-    assign peri_arready[5]       = axi_bus_spi.arready;
-    assign peri_rvalid[5]        = axi_bus_spi.rvalid;
-    assign peri_bresp[10+:2]     = axi_bus_spi.bresp;
-    assign peri_rresp[10+:2]     = axi_bus_spi.rresp;
-    assign peri_rdata[160+:32]   = axi_bus_spi.rdata;
-
-    // -----------------------------------------------------------------
-    // SDIO controller (ZipCPU sdspi, AXI-Lite control, no DMA) -> onboard
-    // microSD slot. See sdspi_axi_wrap.sv for the configuration and tie-offs.
-    // sd_int is left dangling for now (OR into meip when an SD IRQ wanted).
-    // -----------------------------------------------------------------
-    wire sd_int;
-    sdspi_axi_wrap u_sdio (
-        .clk_i    (clk_core),
-        .rstn_i   (rstn_core),
-        .s_axi    (axi_bus_sdio.slave),
-        .sd_clk_o (sd_clk_o),
-        .sd_cmd_io(sd_cmd_io),
-        .sd_dat_io(sd_dat_io),
-        .sd_int_o (sd_int)
-    );
+    assign axi_bus_spi.awvalid   = peri_awvalid[4];
+    assign axi_bus_spi.wvalid    = peri_wvalid[4];
+    assign axi_bus_spi.bready    = peri_bready[4];
+    assign axi_bus_spi.arvalid   = peri_arvalid[4];
+    assign axi_bus_spi.rready    = peri_rready[4];
+    assign peri_awready[4]       = axi_bus_spi.awready;
+    assign peri_wready[4]        = axi_bus_spi.wready;
+    assign peri_bvalid[4]        = axi_bus_spi.bvalid;
+    assign peri_arready[4]       = axi_bus_spi.arready;
+    assign peri_rvalid[4]        = axi_bus_spi.rvalid;
+    assign peri_bresp[8+:2]      = axi_bus_spi.bresp;
+    assign peri_rresp[8+:2]      = axi_bus_spi.rresp;
+    assign peri_rdata[128+:32]   = axi_bus_spi.rdata;
 
     // -----------------------------------------------------------------
     // I2C master (axi4_lite_i2c). Open-drain pins: the peripheral outputs

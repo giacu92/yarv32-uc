@@ -66,14 +66,14 @@ import rv32_pkg::*;
  */
 module axi4_lite_xbar #(
     // Number of targets. Override together with BASES/SIZES.
-    parameter int unsigned N = 4,
+    parameter int unsigned N = 3,
 
     // Window bases, bits [32*i +: 32] = base of target i.
-    // Default = the current board peri map (m0..m3).
-    parameter logic [N*32-1:0] BASES = {SDIO_BASE, MSIP_PERI_ADDR, MTIMER_BASE, UART_BASE},
+    // Default = the fixed head of the peri map (m0..m2).
+    parameter logic [N*32-1:0] BASES = {MSIP_PERI_ADDR, MTIMER_BASE, UART_BASE},
 
     // Window sizes, bits [32*i +: 32] = size of target i.
-    parameter logic [N*32-1:0] SIZES = {SDIO_SIZE, MSIP_PERI_SIZE, MTIMER_SIZE, UART_SIZE}
+    parameter logic [N*32-1:0] SIZES = {MSIP_PERI_SIZE, MTIMER_SIZE, UART_SIZE}
 ) (
     input wire clk_i,
     input wire rstn_i,

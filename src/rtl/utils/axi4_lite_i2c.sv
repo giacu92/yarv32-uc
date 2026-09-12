@@ -318,6 +318,21 @@ module axi4_lite_i2c #(
     // before sampling.  Only when a slave is actually addressed.
     wire stretch_hold = (phase_q == 2'd1) && !scl_i && (state_q == ST_SHIFT || state_q == ST_ACK);
 
+    // Command handshake.  cmd_valid_q is SET by the AXI register block (a
+    // REG_CMD write) and CLEARED when the engine consumes the command, which
+    // would give the flop two driving always_ff blocks -- Gowin rejects that
+    // (EX2000 "constantly driven from multiple places").  The engine instead
+    // exports the consume condition combinationally and the register block
+    // owns the flop; the set in the REG_CMD case comes after the clear below
+    // it, so a write landing in the same cycle as a consume is not lost.
+    //   idle: a fresh transaction is latched out of ST_IDLE.
+    //   ack : a read continues into another byte at ST_ACK phase 3, which is
+    //         inside the `phase_tick && !stretch_hold` guard of the engine.
+    wire cmd_consume_idle = (state_q == ST_IDLE) && enable_q && cmd_valid_q;
+    wire cmd_consume_ack = phase_tick && !stretch_hold && (state_q == ST_ACK) &&
+        (phase_q == 2'd3) && read_q && !(stop_after_q || nack_cmd_q) && cmd_valid_q;
+    wire cmd_consume = cmd_consume_idle || cmd_consume_ack;
+
     always_ff @(posedge clk_i) begin
         if (!rstn_i) begin
             state_q      <= ST_IDLE;
@@ -329,18 +344,14 @@ module axi4_lite_i2c #(
             stop_after_q <= 1'b0;
             bus_active_q <= 1'b0;
             byte_nack_q  <= 1'b0;
-            cmd_valid_q  <= 1'b0;
-            cmd_start_q  <= 1'b0;
-            cmd_stop_q   <= 1'b0;
-            cmd_read_q   <= 1'b0;
-            cmd_nack_q   <= 1'b0;
+            // cmd_valid_q / cmd_start_q / cmd_stop_q / cmd_read_q /
+            // cmd_nack_q are driven and reset by the AXI register block.
             tx_rptr_q    <= '0;
             rx_wptr_q    <= '0;
         end else begin
             // Command latch: consume in IDLE to start a transaction.  A read
             // continuation CMD is consumed at ST_ACK phase 3 (see below).
-            if (state_q == ST_IDLE && enable_q && cmd_valid_q) begin
-                cmd_valid_q  <= 1'b0;
+            if (cmd_consume_idle) begin
                 read_q       <= cmd_read_q;
                 nack_cmd_q   <= cmd_nack_q;
                 stop_after_q <= cmd_stop_q;
@@ -353,7 +364,7 @@ module axi4_lite_i2c #(
                     // ST_SHIFT enters with the first bit ready.
                     if (!cmd_read_q && !tx_empty) begin
                         shift_q   <= tx_head;
-                        tx_rptr_q <= tx_rptr_q + 1;
+                        tx_rptr_q <= tx_rptr_q + 1'b1;
                     end else begin
                         shift_q <= '0;
                     end
@@ -378,7 +389,7 @@ module axi4_lite_i2c #(
                                         state_q     <= ST_SHIFT;
                                     end else if (!tx_empty) begin
                                         shift_q     <= tx_head;
-                                        tx_rptr_q   <= tx_rptr_q + 1;
+                                        tx_rptr_q   <= tx_rptr_q + 1'b1;
                                         bit_cnt_q   <= 3'd7;
                                         byte_nack_q <= 1'b0;
                                         phase_q     <= 2'd0;
@@ -428,7 +439,7 @@ module axi4_lite_i2c #(
                                     if (!read_q && sda_i) byte_nack_q <= 1'b1;
                                     if (read_q && !rx_full) begin
                                         rx_fifo_q[rx_wptr_q[RX_PTR_W-1:0]] <= shift_q;
-                                        rx_wptr_q                          <= rx_wptr_q + 1;
+                                        rx_wptr_q                          <= rx_wptr_q + 1'b1;
                                     end
                                     phase_q <= phase_q + 2'd1;
                                 end
@@ -450,7 +461,7 @@ module axi4_lite_i2c #(
                                             state_q   <= ST_STOP;
                                         end else if (!tx_empty) begin
                                             shift_q     <= tx_head;
-                                            tx_rptr_q   <= tx_rptr_q + 1;
+                                            tx_rptr_q   <= tx_rptr_q + 1'b1;
                                             bit_cnt_q   <= 3'd7;
                                             byte_nack_q <= 1'b0;
                                             phase_q     <= 2'd0;
@@ -469,10 +480,9 @@ module axi4_lite_i2c #(
                                         if (stop_after_q || nack_cmd_q) begin
                                             phase_q <= 2'd0;
                                             state_q <= ST_STOP;
-                                        end else if (cmd_valid_q) begin
+                                        end else if (cmd_consume_ack) begin
                                             nack_cmd_q   <= cmd_nack_q;
                                             stop_after_q <= cmd_stop_q;
-                                            cmd_valid_q  <= 1'b0;
                                             bit_cnt_q    <= 3'd7;
                                             phase_q      <= 2'd0;
                                             state_q      <= ST_SHIFT;
@@ -566,6 +576,12 @@ module axi4_lite_i2c #(
             // tx_rptr_q / rx_wptr_q reset in the engine; rx_rptr_q in the read
             // path — each pointer has exactly one driver.
 
+            cmd_valid_q   <= 1'b0;
+            cmd_start_q   <= 1'b0;
+            cmd_stop_q    <= 1'b0;
+            cmd_read_q    <= 1'b0;
+            cmd_nack_q    <= 1'b0;
+
             irq_tx_q      <= 1'b0;
             irq_rx_q      <= 1'b0;
             irq_done_q    <= 1'b0;
@@ -584,6 +600,10 @@ module axi4_lite_i2c #(
                 wdata_q  <= axi.wdata;
                 wstrb_q  <= axi.wstrb;
             end
+
+            // Engine consumed the queued command.  Placed before the write
+            // decode so a REG_CMD write in the same cycle still wins.
+            if (cmd_consume) cmd_valid_q <= 1'b0;
 
             if (do_write) begin
                 aw_seen_q <= 1'b0;
@@ -612,7 +632,7 @@ module axi4_lite_i2c #(
                         REG_TXDATA: begin
                             if (!tx_full) begin
                                 tx_fifo_q[tx_wptr_q[TX_PTR_W-1:0]] <= wdata_eff[7:0];
-                                tx_wptr_q                          <= tx_wptr_q + 1;
+                                tx_wptr_q                          <= tx_wptr_q + 1'b1;
                             end
                         end
                         REG_IRQ: begin
@@ -686,7 +706,7 @@ module axi4_lite_i2c #(
                     REG_RXDATA: begin
                         if (!rx_empty) begin
                             rdata_q   <= {24'b0, rx_fifo_q[rx_rptr_q[RX_PTR_W-1:0]]};
-                            rx_rptr_q <= rx_rptr_q + 1;
+                            rx_rptr_q <= rx_rptr_q + 1'b1;
                         end else rdata_q <= '0;
                     end
                     REG_IRQ:

@@ -190,6 +190,12 @@ module axi4_lite_spi #(
             rx_q         <= '0;
             bit_cnt_q    <= '0;
             first_edge_q <= 1'b0;
+            // FIFO pointers written by this block (TX pop on launch, RX push
+            // on byte-done) reset here too: a flop must have exactly one
+            // driving always_ff, and Gowin errors (EX2000) on a split where
+            // the reset lives in one block and the update in another.
+            tx_rptr_q    <= '0;
+            rx_wptr_q    <= '0;
         end else begin
             case (state_q)
                 ST_IDLE: begin
@@ -199,7 +205,7 @@ module axi4_lite_spi #(
                         first_edge_q <= 1'b1;  // suppress phantom first change edge
                         state_q      <= ST_SHIFT;
                         // pop TX
-                        tx_rptr_q    <= tx_rptr_q + 1;
+                        tx_rptr_q    <= tx_rptr_q + 1'b1;
                     end
                 end
 
@@ -227,7 +233,7 @@ module axi4_lite_spi #(
                     // Push received byte into RX FIFO if space
                     if (!rx_full) begin
                         rx_fifo_q[rx_wptr_q[RX_PTR_W-1:0]] <= rx_q;
-                        rx_wptr_q                          <= rx_wptr_q + 1;
+                        rx_wptr_q                          <= rx_wptr_q + 1'b1;
                     end
                     // irq_done_q / irq_ovr_q are set in the AXI block from
                     // byte_done / rx_overrun (single driver).
@@ -303,9 +309,9 @@ module axi4_lite_spi #(
             cs_n_q        <= 1'b1;  // deselected
 
             tx_wptr_q     <= '0;
-            tx_rptr_q     <= '0;
-            rx_wptr_q     <= '0;
-            rx_rptr_q     <= '0;
+            // tx_rptr_q / rx_wptr_q reset in the shift engine; rx_rptr_q in
+            // the read path -- each pointer is reset by the block that writes
+            // it, so every flop has a single driver.
 
             irq_tx_q      <= 1'b0;
             irq_rx_q      <= 1'b0;
@@ -346,7 +352,7 @@ module axi4_lite_spi #(
                         REG_TXDATA: begin
                             if (!tx_full) begin
                                 tx_fifo_q[tx_wptr_q[TX_PTR_W-1:0]] <= wdata_eff[7:0];
-                                tx_wptr_q                          <= tx_wptr_q + 1;
+                                tx_wptr_q                          <= tx_wptr_q + 1'b1;
                             end
                         end
                         REG_IRQ: begin
@@ -391,8 +397,9 @@ module axi4_lite_spi #(
 
     always_ff @(posedge clk_i) begin
         if (!rstn_i) begin
-            rvalid_q <= 1'b0;
-            rdata_q  <= '0;
+            rvalid_q  <= 1'b0;
+            rdata_q   <= '0;
+            rx_rptr_q <= '0;  // RX pop lives here, so its reset does too
         end else begin
             if (ar_hs) begin
                 rvalid_q <= 1'b1;
@@ -408,7 +415,7 @@ module axi4_lite_spi #(
                     REG_RXDATA: begin
                         if (!rx_empty) begin
                             rdata_q   <= {24'b0, rx_fifo_q[rx_rptr_q[RX_PTR_W-1:0]]};
-                            rx_rptr_q <= rx_rptr_q + 1;
+                            rx_rptr_q <= rx_rptr_q + 1'b1;
                         end else begin
                             rdata_q <= '0;
                         end

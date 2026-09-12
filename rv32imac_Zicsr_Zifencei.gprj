@@ -10,8 +10,6 @@
         <File path="src/rtl/bus/axi4_lite_if.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/bus/axi4_lite_master_bridge.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/bus/axi4_lite_xbar.sv" type="file.verilog" enable="1"/>
-        <File path="src/rtl/bus/axi4_lite_xbar_3.sv" type="file.verilog" enable="1"/>
-        <File path="src/rtl/bus/axi4_lite_xbar_4.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/fetch_stage.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/reg_file.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/csr_regfile.sv" type="file.verilog" enable="1"/>
@@ -26,6 +24,8 @@
         <File path="src/rtl/utils/msip_peri.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/utils/clint_timer.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/utils/axi4_lite_uart.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/utils/axi4_lite_i2c.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/utils/axi4_lite_spi.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/utils/sdspi_axi_wrap.sv" type="file.verilog" enable="1"/>
         <File path="src/ips/sdspi/rtl/sdio/sdio_top.v" type="file.verilog" enable="1"/>
         <File path="src/ips/sdspi/rtl/sdio/sdio.v" type="file.verilog" enable="1"/>

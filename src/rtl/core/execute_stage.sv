@@ -241,7 +241,7 @@ module execute_stage #(
     // that "the memory port" means two very different things here: the D-mem
     // is a slave that registers its inputs, whereas the peri port feeds
     // axi4_lite_master_bridge, which in S_IDLE drives axi.awaddr / wdata /
-    // wstrb straight through from req_i, then axi4_lite_xbar_3, then the
+    // wstrb straight through from req_i, then the peri xbar, then the
     // slave's own address decode -- all combinational in the address phase.
     // So the peri launch had the ALU driving three levels of fabric plus a
     // slave's register decode in one cycle. The CSR endpoints were the same

@@ -4,6 +4,7 @@
 
 package rv32_pkg;
 
+    `define SDIO_AXI
 
     localparam int unsigned XLEN = 32;
     localparam int unsigned STRB_WIDTH = XLEN / 8;
@@ -102,18 +103,21 @@ package rv32_pkg;
     // ---------------------------------------------------------------
     // Peripheral address map. These are the single source of truth for
     // the peri xbar windows: the board top and the sim top pass them to
-    // the peri xbar (axi4_lite_xbar_3 in sim, axi4_lite_xbar_4 on the
-    // board, which adds the SDIO window) as BASE0..BASEn rather than
+    // the parametric peri xbar (axi4_lite_xbar; the board instantiates
+    // N=6 with the SDIO window, the sim N=5 without it) rather than
     // repeating literals, so the map cannot drift between the two.
     //
     //   0x1000_0000 .. 0x1000_0FFF  UART   (axi4_lite_uart)
     //   0x1000_1000 .. 0x1000_2FFF  CLINT  (clint_timer)
     //   0x1000_3000 .. 0x1000_3FFF  MSIP   (msip_peri)
     //   0x1000_4000 .. 0x1000_4FFF  SDIO   (sdspi_axi_wrap, board only)
+    //   0x1000_5000 .. 0x1000_5FFF  I2C    (axi4_lite_i2c)
+    //   0x1000_6000 .. 0x1000_6FFF  SPI    (axi4_lite_spi)
     //
     // MSIP_PERI_ADDR: a write of bit[0] sets/clears mip.MSIP.
     // SDIO_BASE: ZipCPU sdspi SDIO controller, AXI-Lite control port
-    // (no DMA). Board-only -- sim_top keeps its own 1->3 xbar without it.
+    // (no DMA). Board-only -- sim_top keeps its own smaller xbar without it.
+    // I2C/SPI: board and sim both instantiate them (sim ties the pins off).
     // ---------------------------------------------------------------
     localparam logic [XLEN-1:0] UART_BASE = 32'h1000_0000;
     localparam logic [XLEN-1:0] UART_SIZE = 32'h0000_1000;
@@ -123,6 +127,10 @@ package rv32_pkg;
     localparam logic [XLEN-1:0] MSIP_PERI_SIZE = 32'h0000_1000;
     localparam logic [XLEN-1:0] SDIO_BASE = 32'h1000_4000;
     localparam logic [XLEN-1:0] SDIO_SIZE = 32'h0000_1000;
+    localparam logic [XLEN-1:0] I2C_BASE = 32'h1000_5000;
+    localparam logic [XLEN-1:0] I2C_SIZE = 32'h0000_1000;
+    localparam logic [XLEN-1:0] SPI_BASE = 32'h1000_6000;
+    localparam logic [XLEN-1:0] SPI_SIZE = 32'h0000_1000;
 
     // ---------------------------------------------------------------
     // Bus address decode. The LSU steers its own accesses on

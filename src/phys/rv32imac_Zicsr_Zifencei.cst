@@ -41,6 +41,26 @@ IO_PORT "sd_dat_io[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
 IO_LOC "sd_dat_io[1]" 85;
 IO_PORT "sd_dat_io[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
 
+// I2C master. Open-drain lines: pin is driven low or released; PULL_MODE=UP
+// gives the weak internal pull-up as a fallback, external pull-ups still
+// required for real slaves.
+IO_LOC "i2c_scl_io" 25;
+IO_PORT "i2c_scl_io" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+IO_LOC "i2c_sda_io" 26;
+IO_PORT "i2c_sda_io" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+
+// SPI master (mode 0-3, software chip-select). Outputs DRIVE=8, no pull;
+// MISO gets a weak pull-up so an unconnected line reads idle-high instead of
+// toggling with crosstalk.
+IO_LOC "spi_sck_o" 27;
+IO_PORT "spi_sck_o" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "spi_mosi_o" 28;
+IO_PORT "spi_mosi_o" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "spi_miso_i" 29;
+IO_PORT "spi_miso_i" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+IO_LOC "spi_cs_n_o" 30;
+IO_PORT "spi_cs_n_o" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+
 // 25 MHz reference clock from the MS5351M clock generator (crystal-fed).
 // The MS5351M outputs three independent single-ended CMOS clocks; CLK0
 // is routed to PIN10. Used as a plain 3.3V LVCMOS33 input — no

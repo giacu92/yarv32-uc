@@ -7,10 +7,12 @@ import rv32_pkg::*;
 /**
  * Simulation top (Verilator). Mirrors top_module's peri bus wiring:
  *
- *   CPU.axi_peri -> axi_bus_peri -> axi4_lite_xbar_3 (1->3, base+size)
+ *   CPU.axi_peri -> axi_bus_peri -> axi4_lite_xbar (1->5, base+size)
  *                    |-> u_uart  (0x1000_0000)
  *                    |-> u_timer (0x1000_1000+)
  *                    |-> u_msip  (0x1000_3000)
+ *                    |-> u_i2c   (0x1000_5000)
+ *                    |-> u_spi   (0x1000_6000)
  * Fetch and the LSU each have a dedicated BSRAM (Harvard). The peri bus
  * carries the MSIP + CLINT timer MMIO slaves behind the peri xbar.
  *
@@ -78,6 +80,8 @@ module sim_top #(
     axi4_lite_if axi_bus_msip ();
     axi4_lite_if axi_bus_timer ();
     axi4_lite_if axi_bus_uart ();
+    axi4_lite_if axi_bus_i2c ();
+    axi4_lite_if axi_bus_spi ();
 
     assign axi_bus_peri.aclk     = clk_i;
     assign axi_bus_peri.aresetn  = rstn_i;
@@ -87,6 +91,10 @@ module sim_top #(
     assign axi_bus_timer.aresetn = rstn_i;
     assign axi_bus_uart.aclk     = clk_i;
     assign axi_bus_uart.aresetn  = rstn_i;
+    assign axi_bus_i2c.aclk      = clk_i;
+    assign axi_bus_i2c.aresetn   = rstn_i;
+    assign axi_bus_spi.aclk      = clk_i;
+    assign axi_bus_spi.aresetn   = rstn_i;
 
     // -----------------------------------------------------------------
     // Native memory ports. Fetch and the LSU each get a dedicated
@@ -105,10 +113,15 @@ module sim_top #(
     // Interrupt pending bits (mip.MSIP / mip.MTIP sources).
     wire         msip;
     wire         mtip;
-    // Machine external interrupt: OR of the peripheral level IRQs (UART only
-    // today), same term as the board top.
+    // Machine external interrupt: OR of the peripheral level IRQs, same
+    // term as the board top (UART | I2C | SPI; the board's SDIO int is
+    // dangling and the sim has no SD target at all). The I2C/SPI IRQs
+    // reset deasserted, so they never raise meip unless a test enables
+    // them through MMIO.
     wire         uart_irq;
-    wire         meip = uart_irq;
+    wire         i2c_irq;
+    wire         spi_irq;
+    wire         meip = uart_irq | i2c_irq | spi_irq;
 
     // -----------------------------------------------------------------
     // CPU. Functional ports only; debug is observed via the Verilator
@@ -243,25 +256,188 @@ module sim_top #(
     endgenerate
 
     // -----------------------------------------------------------------
-    // Peripheral bus: peri 1->2 xbar (addr[12] decode) feeding the MSIP
-    // and CLINT timer MMIO slaves, mirroring the board top.
-    //   addr[12]=0 -> m_mem_axi  -> u_msip  (0x1000_0000)
-    //   addr[12]=1 -> m_peri_axi -> u_timer (0x1000_1000+)
+    // Peripheral bus: parametric peri xbar (base+size decode) feeding the
+    // UART, CLINT timer, MSIP, I2C and SPI MMIO slaves, mirroring the board
+    // top (the board adds the SDIO target as window 3; the sim has no SD
+    // card, so its windows are shifted down by one above MSIP).
+    // The xbar's target side is flat vectors (see axi4_lite_xbar.sv for
+    // why), so each slave's axi4_lite_if instance is glued to its bit
+    // with plain assigns: payload broadcast, handshakes bit i = target i.
+    //   window 0 -> axi_bus_uart  (UART_BASE      0x1000_0000)
+    //   window 1 -> axi_bus_timer (MTIMER_BASE    0x1000_1000+)
+    //   window 2 -> axi_bus_msip  (MSIP_PERI_ADDR 0x1000_3000)
+    //   window 3 -> axi_bus_i2c   (I2C_BASE       0x1000_5000)
+    //   window 4 -> axi_bus_spi   (SPI_BASE       0x1000_6000)
     // -----------------------------------------------------------------
-    axi4_lite_xbar_3 #(
-        .BASE0(UART_BASE),
-        .SIZE0(UART_SIZE),
-        .BASE1(MTIMER_BASE),
-        .SIZE1(MTIMER_SIZE),
-        .BASE2(MSIP_PERI_ADDR),
-        .SIZE2(MSIP_PERI_SIZE)
+    localparam int unsigned PERI_N = 5;
+
+    logic [         31:0] peri_awaddr;
+    logic [         31:0] peri_wdata;
+    logic [          3:0] peri_wstrb;
+    logic [         31:0] peri_araddr;
+    logic [   PERI_N-1:0] peri_awvalid;
+    logic [   PERI_N-1:0] peri_wvalid;
+    logic [   PERI_N-1:0] peri_bready;
+    logic [   PERI_N-1:0] peri_arvalid;
+    logic [   PERI_N-1:0] peri_rready;
+    logic [   PERI_N-1:0] peri_awready;
+    logic [   PERI_N-1:0] peri_wready;
+    logic [   PERI_N-1:0] peri_bvalid;
+    logic [   PERI_N-1:0] peri_arready;
+    logic [   PERI_N-1:0] peri_rvalid;
+    logic [ 2*PERI_N-1:0] peri_bresp;
+    logic [ 2*PERI_N-1:0] peri_rresp;
+    logic [32*PERI_N-1:0] peri_rdata;
+
+    axi4_lite_xbar #(
+        .N    (PERI_N),
+        .BASES({SPI_BASE, I2C_BASE, MSIP_PERI_ADDR, MTIMER_BASE, UART_BASE}),
+        .SIZES({SPI_SIZE, I2C_SIZE, MSIP_PERI_SIZE, MTIMER_SIZE, UART_SIZE})
     ) u_peri_xbar (
-        .clk_i (clk_i),
-        .rstn_i(rstn_i),
-        .s_axi (axi_bus_peri.slave),
-        .m0_axi(axi_bus_uart.master),
-        .m1_axi(axi_bus_timer.master),
-        .m2_axi(axi_bus_msip.master)
+        .clk_i      (clk_i),
+        .rstn_i     (rstn_i),
+        .s_axi      (axi_bus_peri.slave),
+        .m_awaddr_o (peri_awaddr),
+        .m_wdata_o  (peri_wdata),
+        .m_wstrb_o  (peri_wstrb),
+        .m_araddr_o (peri_araddr),
+        .m_awvalid_o(peri_awvalid),
+        .m_wvalid_o (peri_wvalid),
+        .m_bready_o (peri_bready),
+        .m_arvalid_o(peri_arvalid),
+        .m_rready_o (peri_rready),
+        .m_awready_i(peri_awready),
+        .m_wready_i (peri_wready),
+        .m_bvalid_i (peri_bvalid),
+        .m_arready_i(peri_arready),
+        .m_rvalid_i (peri_rvalid),
+        .m_bresp_i  (peri_bresp),
+        .m_rresp_i  (peri_rresp),
+        .m_rdata_i  (peri_rdata)
+    );
+
+    // Window 0: UART. Payload is broadcast; glue the per-target bits.
+    assign axi_bus_uart.awaddr   = peri_awaddr;
+    assign axi_bus_uart.wdata    = peri_wdata;
+    assign axi_bus_uart.wstrb    = peri_wstrb;
+    assign axi_bus_uart.araddr   = peri_araddr;
+    assign axi_bus_uart.awvalid  = peri_awvalid[0];
+    assign axi_bus_uart.wvalid   = peri_wvalid[0];
+    assign axi_bus_uart.bready   = peri_bready[0];
+    assign axi_bus_uart.arvalid  = peri_arvalid[0];
+    assign axi_bus_uart.rready   = peri_rready[0];
+    assign peri_awready[0]       = axi_bus_uart.awready;
+    assign peri_wready[0]        = axi_bus_uart.wready;
+    assign peri_bvalid[0]        = axi_bus_uart.bvalid;
+    assign peri_arready[0]       = axi_bus_uart.arready;
+    assign peri_rvalid[0]        = axi_bus_uart.rvalid;
+    assign peri_bresp[0+:2]      = axi_bus_uart.bresp;
+    assign peri_rresp[0+:2]      = axi_bus_uart.rresp;
+    assign peri_rdata[0+:32]     = axi_bus_uart.rdata;
+
+    // Window 1: CLINT timer.
+    assign axi_bus_timer.awaddr  = peri_awaddr;
+    assign axi_bus_timer.wdata   = peri_wdata;
+    assign axi_bus_timer.wstrb   = peri_wstrb;
+    assign axi_bus_timer.araddr  = peri_araddr;
+    assign axi_bus_timer.awvalid = peri_awvalid[1];
+    assign axi_bus_timer.wvalid  = peri_wvalid[1];
+    assign axi_bus_timer.bready  = peri_bready[1];
+    assign axi_bus_timer.arvalid = peri_arvalid[1];
+    assign axi_bus_timer.rready  = peri_rready[1];
+    assign peri_awready[1]       = axi_bus_timer.awready;
+    assign peri_wready[1]        = axi_bus_timer.wready;
+    assign peri_bvalid[1]        = axi_bus_timer.bvalid;
+    assign peri_arready[1]       = axi_bus_timer.arready;
+    assign peri_rvalid[1]        = axi_bus_timer.rvalid;
+    assign peri_bresp[2+:2]      = axi_bus_timer.bresp;
+    assign peri_rresp[2+:2]      = axi_bus_timer.rresp;
+    assign peri_rdata[32+:32]    = axi_bus_timer.rdata;
+
+    // Window 2: MSIP.
+    assign axi_bus_msip.awaddr   = peri_awaddr;
+    assign axi_bus_msip.wdata    = peri_wdata;
+    assign axi_bus_msip.wstrb    = peri_wstrb;
+    assign axi_bus_msip.araddr   = peri_araddr;
+    assign axi_bus_msip.awvalid  = peri_awvalid[2];
+    assign axi_bus_msip.wvalid   = peri_wvalid[2];
+    assign axi_bus_msip.bready   = peri_bready[2];
+    assign axi_bus_msip.arvalid  = peri_arvalid[2];
+    assign axi_bus_msip.rready   = peri_rready[2];
+    assign peri_awready[2]       = axi_bus_msip.awready;
+    assign peri_wready[2]        = axi_bus_msip.wready;
+    assign peri_bvalid[2]        = axi_bus_msip.bvalid;
+    assign peri_arready[2]       = axi_bus_msip.arready;
+    assign peri_rvalid[2]        = axi_bus_msip.rvalid;
+    assign peri_bresp[4+:2]      = axi_bus_msip.bresp;
+    assign peri_rresp[4+:2]      = axi_bus_msip.rresp;
+    assign peri_rdata[64+:32]    = axi_bus_msip.rdata;
+
+    // Window 3: I2C. Pins are tied off — no I2C slave model, so the lines
+    // read released (high): an enabled transfer sees all-1s and times out
+    // per the engine, which is exactly how an open bus behaves.
+    assign axi_bus_i2c.awaddr    = peri_awaddr;
+    assign axi_bus_i2c.wdata     = peri_wdata;
+    assign axi_bus_i2c.wstrb     = peri_wstrb;
+    assign axi_bus_i2c.araddr    = peri_araddr;
+    assign axi_bus_i2c.awvalid   = peri_awvalid[3];
+    assign axi_bus_i2c.wvalid    = peri_wvalid[3];
+    assign axi_bus_i2c.bready    = peri_bready[3];
+    assign axi_bus_i2c.arvalid   = peri_arvalid[3];
+    assign axi_bus_i2c.rready    = peri_rready[3];
+    assign peri_awready[3]       = axi_bus_i2c.awready;
+    assign peri_wready[3]        = axi_bus_i2c.wready;
+    assign peri_bvalid[3]        = axi_bus_i2c.bvalid;
+    assign peri_arready[3]       = axi_bus_i2c.arready;
+    assign peri_rvalid[3]        = axi_bus_i2c.rvalid;
+    assign peri_bresp[6+:2]      = axi_bus_i2c.bresp;
+    assign peri_rresp[6+:2]      = axi_bus_i2c.rresp;
+    assign peri_rdata[96+:32]    = axi_bus_i2c.rdata;
+
+    wire unused_i2c_scl_oe, unused_i2c_sda_oe;
+
+    axi4_lite_i2c u_i2c (
+        .clk_i    (clk_i),
+        .rstn_i   (rstn_i),
+        .axi      (axi_bus_i2c.slave),
+        .scl_i    (1'b1),               // released line (pulled high)
+        .sda_i    (1'b1),
+        .scl_oe_o (unused_i2c_scl_oe),
+        .sda_oe_o (unused_i2c_sda_oe),
+        .i2c_irq_o(i2c_irq)
+    );
+
+    // Window 4: SPI. MISO tied low (no slave model); the pin outputs sink
+    // to unused wires.
+    assign axi_bus_spi.awaddr  = peri_awaddr;
+    assign axi_bus_spi.wdata   = peri_wdata;
+    assign axi_bus_spi.wstrb   = peri_wstrb;
+    assign axi_bus_spi.araddr  = peri_araddr;
+    assign axi_bus_spi.awvalid = peri_awvalid[4];
+    assign axi_bus_spi.wvalid  = peri_wvalid[4];
+    assign axi_bus_spi.bready  = peri_bready[4];
+    assign axi_bus_spi.arvalid = peri_arvalid[4];
+    assign axi_bus_spi.rready  = peri_rready[4];
+    assign peri_awready[4]     = axi_bus_spi.awready;
+    assign peri_wready[4]      = axi_bus_spi.wready;
+    assign peri_bvalid[4]      = axi_bus_spi.bvalid;
+    assign peri_arready[4]     = axi_bus_spi.arready;
+    assign peri_rvalid[4]      = axi_bus_spi.rvalid;
+    assign peri_bresp[8+:2]    = axi_bus_spi.bresp;
+    assign peri_rresp[8+:2]    = axi_bus_spi.rresp;
+    assign peri_rdata[128+:32] = axi_bus_spi.rdata;
+
+    wire unused_spi_sck, unused_spi_mosi, unused_spi_cs_n;
+
+    axi4_lite_spi u_spi (
+        .clk_i     (clk_i),
+        .rstn_i    (rstn_i),
+        .axi       (axi_bus_spi.slave),
+        .spi_sck_o (unused_spi_sck),
+        .spi_mosi_o(unused_spi_mosi),
+        .spi_miso_i(1'b0),
+        .spi_cs_n_o(unused_spi_cs_n),
+        .spi_irq_o (spi_irq)
     );
 
     msip_peri u_msip (

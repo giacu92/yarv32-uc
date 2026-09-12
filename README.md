@@ -209,7 +209,7 @@ src/rtl/pkg/   rv32_pkg.sv          types, opcodes, de_t D/E control struct
 src/rtl/core/  pipeline stages + CPU top + reg file + ALU + trap unit + board top
 src/rtl/bus/   AXI4-Lite interface + master bridge + peripheral crossbar
 src/rtl/utils/ native_ram (Harvard I/D-mem), msip_peri, clint_timer,
-               axi4_lite_uart, axi4_lite_xbar_3
+               axi4_lite_uart, axi4_lite_xbar (parametric 1→N)
 src/phys/      pin assignment (.cst) + timing constraints (.sdc)
 impl/          Gowin EDA project + synthesis/PnR Tcl + reports
 sim/           Verilator sim, compliance tests, Spike co-sim, firmware oracles

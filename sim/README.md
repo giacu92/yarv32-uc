@@ -5,7 +5,7 @@ Zicsr + trap/interrupt unit). Not part of the synthesis file list.
 
 The **Harvard** build wires the CPU to a native read-only I-mem (`+IINIT`) and
 a native byte-strobed D-mem (`+DINIT`); the AXI4-Lite peripheral bus carries
-three MMIO slaves behind a 1→3 xbar (`axi4_lite_xbar_3`, windows from
+three MMIO slaves behind the parametric 1→N xbar (`axi4_lite_xbar`, windows from
 `rv32_pkg`; unmapped → DECERR):
 
 | Slave | Base | Role |

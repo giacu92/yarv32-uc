@@ -7,12 +7,14 @@ import rv32_pkg::*;
 /**
  * Simulation top (Verilator). Mirrors top_module's peri bus wiring:
  *
- *   CPU.axi_peri -> axi_bus_peri -> axi4_lite_xbar (1->5, base+size)
+ *   CPU.axi_peri -> axi_bus_peri -> axi4_lite_xbar (1->7, base+size)
  *                    |-> u_uart  (0x1000_0000)
  *                    |-> u_timer (0x1000_1000+)
  *                    |-> u_msip  (0x1000_3000)
  *                    |-> u_i2c   (0x1000_5000)
  *                    |-> u_spi   (0x1000_6000)
+ *                    |-> u_gpio  (0x1000_7000)
+ *                    |-> u_plic  (0x1000_8000)
  * Fetch and the LSU each have a dedicated BSRAM (Harvard). The peri bus
  * carries the MSIP + CLINT timer MMIO slaves behind the peri xbar.
  *
@@ -73,7 +75,7 @@ module sim_top #(
 );
 
     // -----------------------------------------------------------------
-    // AXI4-Lite peripheral bus (trunk modport) + peri 1->3 split. Window
+    // AXI4-Lite peripheral bus (trunk modport) + peri 1->7 split. Window
     // bases/sizes come from rv32_pkg, same as the board top.
     // -----------------------------------------------------------------
     axi4_lite_if axi_bus_peri ();
@@ -82,6 +84,8 @@ module sim_top #(
     axi4_lite_if axi_bus_uart ();
     axi4_lite_if axi_bus_i2c ();
     axi4_lite_if axi_bus_spi ();
+    axi4_lite_if axi_bus_gpio ();
+    axi4_lite_if axi_bus_plic ();
 
     assign axi_bus_peri.aclk     = clk_i;
     assign axi_bus_peri.aresetn  = rstn_i;
@@ -95,6 +99,10 @@ module sim_top #(
     assign axi_bus_i2c.aresetn   = rstn_i;
     assign axi_bus_spi.aclk      = clk_i;
     assign axi_bus_spi.aresetn   = rstn_i;
+    assign axi_bus_gpio.aclk     = clk_i;
+    assign axi_bus_gpio.aresetn  = rstn_i;
+    assign axi_bus_plic.aclk     = clk_i;
+    assign axi_bus_plic.aresetn  = rstn_i;
 
     // -----------------------------------------------------------------
     // Native memory ports. Fetch and the LSU each get a dedicated
@@ -113,14 +121,15 @@ module sim_top #(
     // Interrupt pending bits (mip.MSIP / mip.MTIP sources).
     wire         msip;
     wire         mtip;
-    // Machine external interrupt: OR of the peripheral level IRQs, same
-    // term as the board top (UART | I2C | SPI). The I2C/SPI IRQs reset
-    // deasserted, so they never raise meip unless a test enables them
-    // through MMIO.
+    // Machine external interrupt: the PLIC aggregates the peripheral
+    // level IRQs (UART / I2C / SPI / GPIO), same as the board top. The
+    // source IRQs reset deasserted, so they never raise meip unless a
+    // test enables them through MMIO.
     wire         uart_irq;
     wire         i2c_irq;
     wire         spi_irq;
-    wire         meip = uart_irq | i2c_irq | spi_irq;
+    wire         gpio_irq;
+    wire         meip;
 
     // -----------------------------------------------------------------
     // CPU. Functional ports only; debug is observed via the Verilator
@@ -256,8 +265,8 @@ module sim_top #(
 
     // -----------------------------------------------------------------
     // Peripheral bus: parametric peri xbar (base+size decode) feeding the
-    // UART, CLINT timer, MSIP, I2C and SPI MMIO slaves, mirroring the board
-    // top, which now has the same five windows.
+    // UART, CLINT timer, MSIP, I2C, SPI, GPIO and PLIC MMIO slaves,
+    // mirroring the board top, which now has the same seven windows.
     // The xbar's target side is flat vectors (see axi4_lite_xbar.sv for
     // why), so each slave's axi4_lite_if instance is glued to its bit
     // with plain assigns: payload broadcast, handshakes bit i = target i.
@@ -266,8 +275,10 @@ module sim_top #(
     //   window 2 -> axi_bus_msip  (MSIP_PERI_ADDR 0x1000_3000)
     //   window 3 -> axi_bus_i2c   (I2C_BASE       0x1000_5000)
     //   window 4 -> axi_bus_spi   (SPI_BASE       0x1000_6000)
+    //   window 5 -> axi_bus_gpio  (GPIO_BASE      0x1000_7000)
+    //   window 6 -> axi_bus_plic  (PLIC_BASE      0x1000_8000)
     // -----------------------------------------------------------------
-    localparam int unsigned PERI_N = 5;
+    localparam int unsigned PERI_N = 7;
 
     logic [         31:0] peri_awaddr;
     logic [         31:0] peri_wdata;
@@ -289,8 +300,8 @@ module sim_top #(
 
     axi4_lite_xbar #(
         .N    (PERI_N),
-        .BASES({SPI_BASE, I2C_BASE, MSIP_PERI_ADDR, MTIMER_BASE, UART_BASE}),
-        .SIZES({SPI_SIZE, I2C_SIZE, MSIP_PERI_SIZE, MTIMER_SIZE, UART_SIZE})
+        .BASES({PLIC_BASE, GPIO_BASE, SPI_BASE, I2C_BASE, MSIP_PERI_ADDR, MTIMER_BASE, UART_BASE}),
+        .SIZES({PLIC_SIZE, GPIO_SIZE, SPI_SIZE, I2C_SIZE, MSIP_PERI_SIZE, MTIMER_SIZE, UART_SIZE})
     ) u_peri_xbar (
         .clk_i      (clk_i),
         .rstn_i     (rstn_i),
@@ -436,6 +447,91 @@ module sim_top #(
         .spi_miso_i(1'b0),
         .spi_cs_n_o(unused_spi_cs_n),
         .spi_irq_o (spi_irq)
+    );
+
+    // Window 5: GPIO. Sim has no external pins — firmware drives its own
+    // inputs through the loopback below, so the peripheral's edge detect
+    // (2-flop sync + prev flop) is exercised exactly as on the board.
+    assign axi_bus_gpio.awaddr  = peri_awaddr;
+    assign axi_bus_gpio.wdata   = peri_wdata;
+    assign axi_bus_gpio.wstrb   = peri_wstrb;
+    assign axi_bus_gpio.araddr  = peri_araddr;
+    assign axi_bus_gpio.awvalid = peri_awvalid[5];
+    assign axi_bus_gpio.wvalid  = peri_wvalid[5];
+    assign axi_bus_gpio.bready  = peri_bready[5];
+    assign axi_bus_gpio.arvalid = peri_arvalid[5];
+    assign axi_bus_gpio.rready  = peri_rready[5];
+    assign peri_awready[5]      = axi_bus_gpio.awready;
+    assign peri_wready[5]       = axi_bus_gpio.wready;
+    assign peri_bvalid[5]       = axi_bus_gpio.bvalid;
+    assign peri_arready[5]      = axi_bus_gpio.arready;
+    assign peri_rvalid[5]       = axi_bus_gpio.rvalid;
+    assign peri_bresp[10+:2]    = axi_bus_gpio.bresp;
+    assign peri_rresp[10+:2]    = axi_bus_gpio.rresp;
+    assign peri_rdata[160+:32]  = axi_bus_gpio.rdata;
+
+    // GPIO pin model: loopback with pull-up semantics, board-parity.
+    // A pin configured as output reads back what it drives; a pin
+    // released (DIR=0) reads the pull-up (1), matching the .cst
+    // PULL_MODE=UP pads. No inout port — sim only ever observes the
+    // peripheral through its own outputs.
+    logic [3:0] gpio_out, gpio_oe;
+    wire [3:0] gpio_pin = (gpio_oe & gpio_out) | ~gpio_oe;
+
+    // 2-flop input synchronizer, same chain as the board pads (reset
+    // high: pulled-up idle).
+    logic [3:0] gpio_sync0_q, gpio_sync1_q;
+
+    always_ff @(posedge clk_i) begin
+        if (!rstn_i) begin
+            gpio_sync0_q <= 4'hF;
+            gpio_sync1_q <= 4'hF;
+        end else begin
+            gpio_sync0_q <= gpio_pin;
+            gpio_sync1_q <= gpio_sync0_q;
+        end
+    end
+
+    axi4_lite_gpio #(
+        .WIDTH(4)
+    ) u_gpio (
+        .clk_i     (clk_i),
+        .rstn_i    (rstn_i),
+        .axi       (axi_bus_gpio.slave),
+        .gpio_i    (gpio_sync1_q),
+        .gpio_o    (gpio_out),
+        .gpio_oe_o (gpio_oe),
+        .gpio_irq_o(gpio_irq)
+    );
+
+    // Window 6: PLIC. Aggregates the peripheral IRQs into meip.
+    assign axi_bus_plic.awaddr  = peri_awaddr;
+    assign axi_bus_plic.wdata   = peri_wdata;
+    assign axi_bus_plic.wstrb   = peri_wstrb;
+    assign axi_bus_plic.araddr  = peri_araddr;
+    assign axi_bus_plic.awvalid = peri_awvalid[6];
+    assign axi_bus_plic.wvalid  = peri_wvalid[6];
+    assign axi_bus_plic.bready  = peri_bready[6];
+    assign axi_bus_plic.arvalid = peri_arvalid[6];
+    assign axi_bus_plic.rready  = peri_rready[6];
+    assign peri_awready[6]      = axi_bus_plic.awready;
+    assign peri_wready[6]       = axi_bus_plic.wready;
+    assign peri_bvalid[6]       = axi_bus_plic.bvalid;
+    assign peri_arready[6]      = axi_bus_plic.arready;
+    assign peri_rvalid[6]       = axi_bus_plic.rvalid;
+    assign peri_bresp[12+:2]    = axi_bus_plic.bresp;
+    assign peri_rresp[12+:2]    = axi_bus_plic.rresp;
+    assign peri_rdata[192+:32]  = axi_bus_plic.rdata;
+
+    // Source IDs (rv32_pkg::PLIC_SRC_*): 0=none, 1=UART, 2=I2C, 3=SPI,
+    // 4=GPIO, 5-15 reserved (tied off). MSIP/MTIP do NOT pass through
+    // here — they are CLINT-style direct bits into csr_regfile.
+    axi4_lite_plic u_plic (
+        .clk_i (clk_i),
+        .rstn_i(rstn_i),
+        .axi   (axi_bus_plic.slave),
+        .irq_i ({11'd0, gpio_irq, spi_irq, i2c_irq, uart_irq, 1'b0}),
+        .meip_o(meip)
     );
 
     msip_peri u_msip (

@@ -19,7 +19,9 @@
         <File path="src/rtl/core/top_module.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/trap_unit.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/pkg/rv32_pkg.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/utils/axi4_lite_gpio.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/utils/axi4_lite_i2c.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/utils/axi4_lite_plic.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/utils/axi4_lite_spi.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/utils/axi4_lite_uart.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/utils/clint_timer.sv" type="file.verilog" enable="1"/>

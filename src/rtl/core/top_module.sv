@@ -16,7 +16,7 @@ import rv32_pkg::*;
  *   native_ram (u_imem)   native_ram (u_dmem)         axi_bus_peri
  *   (instr)                (data + .rodata + stack)      |
  *                                                        +-- axi4_lite_xbar
- *                                                        |     (peri 1->6,
+ *                                                        |     (peri 1->7,
  *                                                        |      base+size)
  *                                                        |
  *                            0x1000_0000..0FFF ----------+--> uart_i  (UART)
@@ -24,13 +24,15 @@ import rv32_pkg::*;
  *                            0x1000_3000..3FFF ----------+--> u_msip  (MSIP)
  *                            0x1000_5000..5FFF ----------+--> u_i2c   (I2C)
  *                            0x1000_6000..6FFF ----------+--> u_spi   (SPI)
+ *                            0x1000_7000..7FFF ----------+--> u_gpio  (GPIO)
+ *                            0x1000_8000..8FFF ----------+--> u_plic  (PLIC)
  *
  *   Fetch and the LSU no longer contend: each has a dedicated native
  *   BSRAM port. AXI survives only for peripherals (the peri bridge is
  *   inside the CPU). The board top is pure point-to-point wires — the
  *   LSU steers addr[PERI_ADDR_BIT] internally, and the peri xbar here
- *   splits the peri bus into UART / CLINT timer / MSIP / I2C / SPI
- *   by base+size. The window bases come from rv32_pkg (UART_BASE /
+ *   splits the peri bus into UART / CLINT timer / MSIP / I2C / SPI /
+ *   GPIO / PLIC by base+size. The window bases come from rv32_pkg (UART_BASE /
  *   MTIMER_BASE / MSIP_PERI_ADDR / I2C_BASE / SPI_BASE) so the
  *   map is defined in exactly one place.
  *
@@ -67,6 +69,10 @@ module top_module (
     output wire spi_mosi_o,
     input  wire spi_miso_i,
     output wire spi_cs_n_o,
+
+    // GPIO (4 pins, push-pull; DIR=0 releases the pad, and the .cst's
+    // PULL_MODE=UP holds a released pad high). Pin assignments in the .cst.
+    inout wire [3:0] gpio_io,
 
     // Debug LEDs: led_o[0] = stall indicator, led_o[3:1] = alive counter.
     output wire [3:0] led_o
@@ -183,12 +189,14 @@ module top_module (
     // -----------------------------------------------------------------
     // AXI4-Lite buses (trunk modport).
     //
-    //   axi_bus_peri  : CPU peri master -> peri xbar (1->5, base+size decode).
+    //   axi_bus_peri  : CPU peri master -> peri xbar (1->7, base+size decode).
     //   axi_bus_uart  : xbar m0 -> UART  slave (UART_BASE      0x1000_0000).
     //   axi_bus_timer : xbar m1 -> timer slave (MTIMER_BASE    0x1000_1000).
     //   axi_bus_msip  : xbar m2 -> MSIP  slave (MSIP_PERI_ADDR 0x1000_3000).
     //   axi_bus_i2c   : xbar m3 -> I2C   slave (I2C_BASE       0x1000_5000).
     //   axi_bus_spi   : xbar m4 -> SPI   slave (SPI_BASE       0x1000_6000).
+    //   axi_bus_gpio  : xbar m5 -> GPIO   slave (GPIO_BASE       0x1000_7000).
+    //   axi_bus_plic  : xbar m6 -> PLIC   slave (PLIC_BASE       0x1000_8000).
     // -----------------------------------------------------------------
     axi4_lite_if axi_bus_peri ();
     axi4_lite_if axi_bus_msip ();
@@ -196,6 +204,8 @@ module top_module (
     axi4_lite_if axi_bus_uart ();
     axi4_lite_if axi_bus_i2c ();
     axi4_lite_if axi_bus_spi ();
+    axi4_lite_if axi_bus_gpio ();
+    axi4_lite_if axi_bus_plic ();
 
     // Single clock domain: the whole fabric (CPU bridge, memories, the
     // buses) runs on clk_core / rstn_core. There is NO clock-domain
@@ -213,6 +223,10 @@ module top_module (
     assign axi_bus_i2c.aresetn   = rstn_core;
     assign axi_bus_spi.aclk      = clk_core;
     assign axi_bus_spi.aresetn   = rstn_core;
+    assign axi_bus_gpio.aclk     = clk_core;
+    assign axi_bus_gpio.aresetn  = rstn_core;
+    assign axi_bus_plic.aclk     = clk_core;
+    assign axi_bus_plic.aresetn  = rstn_core;
 
     // Debug tap: decode or execute stage stall.
     wire         dbg_stall;
@@ -236,14 +250,19 @@ module top_module (
     wire         msip;
     wire         mtip;
 
-    // Machine external interrupt: OR of the peripheral level IRQs (UART,
-    // I2C, SPI). The IRQs reset
-    // deasserted (peripheral IE registers reset 0), so an unconfigured
-    // peripheral never raises meip. Swap in a PLIC when cause IDs matter.
+    // Machine external interrupt: the PLIC aggregates the peripheral
+    // level IRQs (UART / I2C / SPI / GPIO) and adds cause IDs plus an
+    // enable mask. ENABLE resets all-ones, so meip degenerates to the
+    // OR of the lines and pre-PLIC firmware runs unchanged; the source
+    // IRQs still reset deasserted (peripheral IE registers reset 0), so
+    // an unconfigured peripheral never raises meip. Source IDs come from
+    // rv32_pkg (PLIC_SRC_*); MSIP/MTIP stay direct (CLINT-style, outside
+    // the PLIC).
     wire         uart_irq;
     wire         i2c_irq;
     wire         spi_irq;
-    wire         meip = uart_irq | i2c_irq | spi_irq;
+    wire         gpio_irq;
+    wire         meip;
 
     // -----------------------------------------------------------------
     // CPU. Functional ports only — no debug crosses the CPU boundary
@@ -363,10 +382,12 @@ module top_module (
     //   window 2 -> axi_bus_msip  (MSIP_PERI_ADDR 0x1000_3000, 4 KiB)
     //   window 3 -> axi_bus_i2c   (I2C_BASE       0x1000_5000, 4 KiB)
     //   window 4 -> axi_bus_spi   (SPI_BASE       0x1000_6000, 4 KiB)
+    //   window 5 -> axi_bus_gpio  (GPIO_BASE       0x1000_7000, 4 KiB)
+    //   window 6 -> axi_bus_plic  (PLIC_BASE       0x1000_8000, 4 KiB)
     // 0x1000_4000 is unmapped (it held the SDIO controller until it was
     // dropped from this branch); an access there gets a DECERR.
     // -----------------------------------------------------------------
-    localparam int unsigned PERI_N = 5;
+    localparam int unsigned PERI_N = 7;
 
     logic [         31:0] peri_awaddr;
     logic [         31:0] peri_wdata;
@@ -389,6 +410,8 @@ module top_module (
     axi4_lite_xbar #(
         .N(PERI_N),
         .BASES({
+            rv32_pkg::PLIC_BASE,
+            rv32_pkg::GPIO_BASE,
             rv32_pkg::SPI_BASE,
             rv32_pkg::I2C_BASE,
             rv32_pkg::MSIP_PERI_ADDR,
@@ -396,6 +419,8 @@ module top_module (
             rv32_pkg::UART_BASE
         }),
         .SIZES({
+            rv32_pkg::PLIC_SIZE,
+            rv32_pkg::GPIO_SIZE,
             rv32_pkg::SPI_SIZE,
             rv32_pkg::I2C_SIZE,
             rv32_pkg::MSIP_PERI_SIZE,
@@ -520,6 +545,44 @@ module top_module (
     assign peri_rresp[8+:2]      = axi_bus_spi.rresp;
     assign peri_rdata[128+:32]   = axi_bus_spi.rdata;
 
+    // Window 5: GPIO.
+    assign axi_bus_gpio.awaddr   = peri_awaddr;
+    assign axi_bus_gpio.wdata    = peri_wdata;
+    assign axi_bus_gpio.wstrb    = peri_wstrb;
+    assign axi_bus_gpio.araddr   = peri_araddr;
+    assign axi_bus_gpio.awvalid  = peri_awvalid[5];
+    assign axi_bus_gpio.wvalid   = peri_wvalid[5];
+    assign axi_bus_gpio.bready   = peri_bready[5];
+    assign axi_bus_gpio.arvalid  = peri_arvalid[5];
+    assign axi_bus_gpio.rready   = peri_rready[5];
+    assign peri_awready[5]       = axi_bus_gpio.awready;
+    assign peri_wready[5]        = axi_bus_gpio.wready;
+    assign peri_bvalid[5]        = axi_bus_gpio.bvalid;
+    assign peri_arready[5]       = axi_bus_gpio.arready;
+    assign peri_rvalid[5]        = axi_bus_gpio.rvalid;
+    assign peri_bresp[10+:2]     = axi_bus_gpio.bresp;
+    assign peri_rresp[10+:2]     = axi_bus_gpio.rresp;
+    assign peri_rdata[160+:32]   = axi_bus_gpio.rdata;
+
+    // Window 6: PLIC.
+    assign axi_bus_plic.awaddr   = peri_awaddr;
+    assign axi_bus_plic.wdata    = peri_wdata;
+    assign axi_bus_plic.wstrb    = peri_wstrb;
+    assign axi_bus_plic.araddr   = peri_araddr;
+    assign axi_bus_plic.awvalid  = peri_awvalid[6];
+    assign axi_bus_plic.wvalid   = peri_wvalid[6];
+    assign axi_bus_plic.bready   = peri_bready[6];
+    assign axi_bus_plic.arvalid  = peri_arvalid[6];
+    assign axi_bus_plic.rready   = peri_rready[6];
+    assign peri_awready[6]       = axi_bus_plic.awready;
+    assign peri_wready[6]        = axi_bus_plic.wready;
+    assign peri_bvalid[6]        = axi_bus_plic.bvalid;
+    assign peri_arready[6]       = axi_bus_plic.arready;
+    assign peri_rvalid[6]        = axi_bus_plic.rvalid;
+    assign peri_bresp[12+:2]     = axi_bus_plic.bresp;
+    assign peri_rresp[12+:2]     = axi_bus_plic.rresp;
+    assign peri_rdata[192+:32]   = axi_bus_plic.rdata;
+
     // -----------------------------------------------------------------
     // I2C master (axi4_lite_i2c). Open-drain pins: the peripheral outputs
     // only an oe (drive low when set); the tri-state here releases the pin
@@ -583,6 +646,77 @@ module top_module (
         .spi_miso_i(spi_miso_sync_q[1]),
         .spi_cs_n_o(spi_cs_n_o),
         .spi_irq_o (spi_irq)
+    );
+
+    // -----------------------------------------------------------------
+    // GPIO (axi4_lite_gpio), 4 push-pull header pins.
+    //
+    // Pad glue: the peripheral emits data + a per-pin output enable; the
+    // pad is a tri-state here. The assigns MUST be per-bit — a single
+    // vector `assign gpio_io = gpio_oe ? gpio_out : 4'bz` REDUCES the
+    // 4-bit oe into one condition, so one enabled pin would drive all
+    // four. Inputs are double-flopped like uart_rxd_i / the I2C lines
+    // (header pins are asynchronous to clk_core, and the GPIO's edge
+    // detect samples the synchronized value straight into a comparison).
+    // The sync chain resets high: the .cst gives every pad PULL_MODE=UP,
+    // so a released pin idles 1 and reset does not manufacture a fake
+    // falling edge. (A fake RISE per pin is unavoidable at reset with the
+    // pull-up — the peripheral's INT_STATUS comes up showing level-high
+    // pending, masked by INT_EN=0; firmware must W1C before arming.)
+    // -----------------------------------------------------------------
+    wire [3:0] gpio_out;
+    wire [3:0] gpio_oe;
+
+    assign gpio_io[0] = gpio_oe[0] ? gpio_out[0] : 1'bz;
+    assign gpio_io[1] = gpio_oe[1] ? gpio_out[1] : 1'bz;
+    assign gpio_io[2] = gpio_oe[2] ? gpio_out[2] : 1'bz;
+    assign gpio_io[3] = gpio_oe[3] ? gpio_out[3] : 1'bz;
+
+    logic [3:0] gpio_sync0_q;
+    logic [3:0] gpio_sync1_q;
+
+    always_ff @(posedge clk_core) begin
+        if (!rstn_core) begin
+            gpio_sync0_q <= 4'hF;  // pulled-up pads idle high
+            gpio_sync1_q <= 4'hF;
+        end else begin
+            gpio_sync0_q <= gpio_io;
+            gpio_sync1_q <= gpio_sync0_q;
+        end
+    end
+
+    axi4_lite_gpio #(
+        .WIDTH(4)
+    ) u_gpio (
+        .clk_i     (clk_core),
+        .rstn_i    (rstn_core),
+        .axi       (axi_bus_gpio.slave),
+        .gpio_i    (gpio_sync1_q),
+        .gpio_o    (gpio_out),
+        .gpio_oe_o (gpio_oe),
+        .gpio_irq_o(gpio_irq)
+    );
+
+    // -----------------------------------------------------------------
+    // PLIC (axi4_lite_plic). Aggregates the peripheral level IRQs into
+    // meip with cause IDs (see the peripheral's header for the claim
+    // contract). irq_i bit i = source ID i: bit 0 tied off (reserved
+    // "no source"), the four wired sources at their rv32_pkg IDs, the
+    // reserved upper IDs tied off.
+    // -----------------------------------------------------------------
+    axi4_lite_plic u_plic (
+        .clk_i(clk_core),
+        .rstn_i(rstn_core),
+        .axi(axi_bus_plic.slave),
+        .irq_i({
+            11'd0,
+            gpio_irq,  // ID 4
+            spi_irq,  // ID 3
+            i2c_irq,  // ID 2
+            uart_irq,  // ID 1
+            1'b0  // ID 0: reserved
+        }),
+        .meip_o(meip)
     );
 
     // -----------------------------------------------------------------

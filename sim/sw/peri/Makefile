@@ -3,7 +3,7 @@
 #   make            build uart_echo
 #   make clean      clean all
 
-TESTS := uart_echo
+TESTS := uart_echo plic_gpio
 
 .PHONY: all clean $(TESTS)
 all:

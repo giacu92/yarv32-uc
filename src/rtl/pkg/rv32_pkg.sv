@@ -110,9 +110,14 @@ package rv32_pkg;
     //   0x1000_3000 .. 0x1000_3FFF  MSIP   (msip_peri)
     //   0x1000_5000 .. 0x1000_5FFF  I2C    (axi4_lite_i2c)
     //   0x1000_6000 .. 0x1000_6FFF  SPI    (axi4_lite_spi)
+    //   0x1000_7000 .. 0x1000_7FFF  GPIO   (axi4_lite_gpio)
+    //   0x1000_8000 .. 0x1000_8FFF  PLIC   (axi4_lite_plic)
     //
     // MSIP_PERI_ADDR: a write of bit[0] sets/clears mip.MSIP.
     // I2C/SPI: board and sim both instantiate them (sim ties the pins off).
+    // GPIO: 4 pins; sim loops the pins back onto themselves (pull-up model).
+    // PLIC: aggregates the peripheral level IRQs (UART/I2C/SPI/GPIO) into
+    // meip; MSIP/MTIP stay direct (CLINT-style, outside the PLIC).
     // 0x1000_4000..0x1000_4FFF is deliberately unmapped: it held an SDIO
     // controller that was dropped from this branch. An access there gets a
     // DECERR from the peri xbar.
@@ -127,6 +132,23 @@ package rv32_pkg;
     localparam logic [XLEN-1:0] I2C_SIZE = 32'h0000_1000;
     localparam logic [XLEN-1:0] SPI_BASE = 32'h1000_6000;
     localparam logic [XLEN-1:0] SPI_SIZE = 32'h0000_1000;
+    localparam logic [XLEN-1:0] GPIO_BASE = 32'h1000_7000;
+    localparam logic [XLEN-1:0] GPIO_SIZE = 32'h0000_1000;
+    localparam logic [XLEN-1:0] PLIC_BASE = 32'h1000_8000;
+    localparam logic [XLEN-1:0] PLIC_SIZE = 32'h0000_1000;
+
+    // ---------------------------------------------------------------
+    // PLIC source IDs (bit positions in the PLIC's pending/enable
+    // registers and in its irq_i input). ID 0 is reserved "no source"
+    // (a CLAIM read returning 0 means "nothing pending"), so the first
+    // real source is 1. Single source of truth for the tops' irq_i
+    // concatenation and for firmware (see sw/peri/plic_gpio).
+    // ---------------------------------------------------------------
+    localparam int unsigned PLIC_SRC_N = 16;
+    localparam int unsigned PLIC_SRC_UART = 1;
+    localparam int unsigned PLIC_SRC_I2C = 2;
+    localparam int unsigned PLIC_SRC_SPI = 3;
+    localparam int unsigned PLIC_SRC_GPIO = 4;
 
     // ---------------------------------------------------------------
     // Bus address decode. The LSU steers its own accesses on

@@ -60,3 +60,6 @@ sim/cosim/ecall/__pycache__/
 
 # UART TX capture written by the sim harness (sim_top's tx monitor).
 sim/sim_uart_tx.txt
+
+# RTL retire-trace dumps (sim_main debug output, regenerable)
+sim/.*.trace

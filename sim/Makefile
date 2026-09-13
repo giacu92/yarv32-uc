@@ -32,6 +32,8 @@ RTL := \
 	../src/rtl/utils/axi4_lite_uart.sv \
 	../src/rtl/utils/axi4_lite_i2c.sv \
 	../src/rtl/utils/axi4_lite_spi.sv \
+	../src/rtl/utils/axi4_lite_gpio.sv \
+	../src/rtl/utils/axi4_lite_plic.sv \
 	sim_top.sv
 
 # Harvard topology: native u_imem (read-only) + u_dmem (byte-strobed) on
@@ -98,7 +100,7 @@ run: $(TOP)
 # uart_echo is special-cased at the end: it needs UART_RX stimulus, and its
 # pass condition is the "GOOD" its firmware transmits, not a memory word.
 REGRESS_TESTS := \
-	quicksort:quicksort:200000:trace:x10=600d \
+	quicksort:quicksort:400000:trace:x10=600d \
 	bp_pred:isa/bp_pred:20000:probe@0x2000=600d \
 	mul_ops:isa/mul_ops:20000:probe@0x2000=600d \
 	div_ops:isa/div_ops:20000:probe@0x2000=600d \
@@ -108,7 +110,8 @@ REGRESS_TESTS := \
 	isa_probe:isa/isa_probe:200000:park \
 	trap:intr/trap:20000:probe@0x2000=600d \
 	wfi_trap:intr/wfi_trap:20000:probe@0x2000=600d \
-	timer:intr/timer:20000:probe@0x2000=600d
+	timer:intr/timer:20000:probe@0x2000=600d \
+	plic_gpio:peri/plic_gpio:200000:probe@0x3000=600d
 
 # ----------------------------------------------------------------------
 # lint — dead wires, unread bits, unused parameters

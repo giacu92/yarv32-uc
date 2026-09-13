@@ -48,6 +48,21 @@ IO_PORT "spi_miso_i" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
 IO_LOC "spi_cs_n_o" 30;
 IO_PORT "spi_cs_n_o" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
 
+// GPIO (4 bidirectional pins, free right-header IOs). Push-pull: DIR=1
+// drives OUT onto the pad, DIR=0 releases it. PULL_MODE=UP so a released /
+// unconnected pin reads a defined 1, matching the sim's loopback model —
+// note the GPIO INT_TYPE resets to level-high, so firmware must W1C
+// INT_STATUS (after setting the type to an edge) before arming
+// interrupts (see sim/sw/peri/plic_gpio).
+IO_LOC "gpio_io[0]" 41;
+IO_PORT "gpio_io[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "gpio_io[1]" 42;
+IO_PORT "gpio_io[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "gpio_io[2]" 71;
+IO_PORT "gpio_io[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "gpio_io[3]" 72;
+IO_PORT "gpio_io[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+
 // 25 MHz reference clock from the MS5351M clock generator (crystal-fed).
 // The MS5351M outputs three independent single-ended CMOS clocks; CLK0
 // is routed to PIN10. Used as a plain 3.3V LVCMOS33 input — no

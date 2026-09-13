@@ -31,20 +31,25 @@ import rv32_pkg::*;
 *                      module replaced -- so firmware written before the
 *                      PLIC (uart_echo, YarvMon) runs unchanged without
 *                      touching it. Software that wants masking writes 0s.
-*   0x08 CLAIM   (R) : returns the lowest-ID ENABLED PENDING source ID
-*                      and completes the claim (clears that source's
-*                      pending bit) in the same read -- claim = complete,
-*                      one transaction, no separate COMPLETE register.
-*                      Returns 0 when nothing is claimable.
+*   0x08 CLAIM   (R) : returns the lowest-ID ENABLED PENDING source ID.
+*                      Side-effect-FREE: the read clears nothing and holds
+*                      no state -- completing the claim is the source's
+*                      own service mechanism (see "PENDING IS THE LINES"
+*                      below). There is deliberately no separate COMPLETE
+*                      register. Returns 0 when nothing is claimable.
 *
 * PENDING IS THE LINES. Every source here is a level whose edge-ness is
 * latched where it belongs -- the GPIO holds INT_STATUS sticky until its
-* W1C, the UART/I2C/SPI hold their condition until serviced -- so
+* W1C, the UART/I2C/SPI hold their condition until serviced -- so the
+* pending vector is exactly the irq_i lines, taken combinationally:
 *
-*   pend_q <= irq_i
+*   pend = irq_i
 *
-* is the whole model: a source's pending is exactly its line, and there
-* is no claim-side state to get wrong. The CLAIM read is then a pure
+* No claim-side register to get wrong, and meip follows a line the same
+* cycle it moves (the bare OR this module replaced had the same shape; a
+* registered pend would only add a cycle of latency, and its sample could
+* miss a 1-cycle pulse entirely -- no edge source can ever be wired here
+* as long as this stays combinational). The CLAIM read is then a pure
 * priority encode of the enabled pending lines; "claim = complete" is
 * realized by the source's own service mechanism (the ISR W1Cs the GPIO,
 * drains the UART), which drops the line, which drops the pending.
@@ -89,13 +94,20 @@ module axi4_lite_plic #(
     localparam logic [2:0] REG_CLAIM = 3'd2;
 
     // =================================================================
-    // Source state: pending (level model, see header) and enable
-    // (reset all-ones -- see header for why).
+    // Source state: pending (the lines themselves -- see header, no
+    // register) and enable (reset all-ones -- see header for why).
     // =================================================================
-    logic [SRC_N-1:0] pend_q;
+    wire  [SRC_N-1:0] pend;
     logic [SRC_N-1:0] enable_q;
 
-    assign meip_o = |(pend_q & enable_q);
+    // Source 0 is reserved "no source" and is masked out of meip: a
+    // caller that forgets the bit-0 tie-off would otherwise create an
+    // unclaimable MEI livelock (meip high while CLAIM returns 0 -- the
+    // encoder below starts at ID 1 and can never service bit 0).
+    localparam logic [SRC_N-1:0] SRC_MASK = {{(SRC_N - 1) {1'b1}}, 1'b0};
+
+    assign pend   = irq_i;
+    assign meip_o = |(pend & enable_q & SRC_MASK);
 
     // =================================================================
     // AXI write path (same accept pattern as axi4_lite_uart). Only
@@ -111,18 +123,29 @@ module axi4_lite_plic #(
     assign axi.awready = !aw_seen_q && !bvalid_q;
     assign axi.wready  = !w_seen_q && !bvalid_q;
 
-    wire              aw_hs = axi.awvalid && axi.awready;
-    wire              w_hs = axi.wvalid && axi.wready;
+    wire               aw_hs = axi.awvalid && axi.awready;
+    wire               w_hs = axi.wvalid && axi.wready;
 
-    wire              aw_present = aw_seen_q || aw_hs;
-    wire              w_present = w_seen_q || w_hs;
+    wire               aw_present = aw_seen_q || aw_hs;
+    wire               w_present = w_seen_q || w_hs;
 
-    wire [       2:0] waddr_eff = aw_hs ? axi.awaddr[4:2] : awaddr_word_q;
-    wire [DATA_W-1:0] wdata_eff = w_hs ? axi.wdata : wdata_q;
-    wire [STRB_W-1:0] wstrb_eff = w_hs ? axi.wstrb : wstrb_q;
+    wire  [       2:0] waddr_eff = aw_hs ? axi.awaddr[4:2] : awaddr_word_q;
+    wire  [DATA_W-1:0] wdata_eff = w_hs ? axi.wdata : wdata_q;
+    wire  [STRB_W-1:0] wstrb_eff = w_hs ? axi.wstrb : wstrb_q;
 
-    // Byte-0 strobe required (same rationale as axi4_lite_uart).
-    wire              wr_low_byte = wstrb_eff[0];
+    // Byte-lane write mask, replicated from the strobe: a sub-word store
+    // MERGES into the register -- strobed lanes take the new data,
+    // unstrobed lanes keep their value. The LSU shifts store data into
+    // the strobed lanes and leaves unstrobed lanes carrying shifted rs2
+    // bits (not zeros), so gating on "byte 0 strobed" would both drop a
+    // store to ENABLE[15:8] (answered OKAY) and ghost-write the upper
+    // half from unstrobed data lanes.
+    logic [DATA_W-1:0] wr_mask;
+    always_comb begin
+        for (int b = 0; b < STRB_W; b++) begin
+            wr_mask[8*b+:8] = {8{wstrb_eff[b]}};
+        end
+    end
 
     assign axi.bvalid = bvalid_q;
     assign axi.bresp  = 2'b00;  // OKAY
@@ -138,7 +161,6 @@ module axi4_lite_plic #(
             wstrb_q       <= '0;
             bvalid_q      <= 1'b0;
             enable_q      <= '1;  // reset: every source enabled (see header)
-            pend_q        <= '0;
             awaddr_word_q <= '0;
         end else begin
             if (aw_hs) begin
@@ -151,19 +173,18 @@ module axi4_lite_plic #(
                 wstrb_q  <= axi.wstrb;
             end
 
-            // Pending is the lines (see header).
-            pend_q <= irq_i;
-
             if (do_write) begin
                 aw_seen_q <= 1'b0;
                 w_seen_q  <= 1'b0;
                 bvalid_q  <= 1'b1;
 
                 unique case (waddr_eff)
+                    // Strobed merge (see wr_mask): a byte store to the
+                    // ENABLE[15:8] half now lands, and an unstrobed lane
+                    // can never reach the register.
                     REG_ENABLE:
-                    if (wr_low_byte) begin
-                        enable_q <= wdata_eff[SRC_N-1:0];
-                    end
+                    enable_q <= (enable_q & ~wr_mask[SRC_N-1:0]) |
+                        (wdata_eff[SRC_N-1:0] & wr_mask[SRC_N-1:0]);
                     default: ;  // PENDING/CLAIM read-only
                 endcase
             end
@@ -190,20 +211,18 @@ module axi4_lite_plic #(
     assign axi.rresp  = 2'b00;  // OKAY
 
     // Lowest-ID enabled-pending priority encode. Index 0 never claims
-    // (source 0 = "no source").
+    // (source 0 = "no source"), which also makes 0 the natural "nothing
+    // claimable" encoding -- the scan initialises sel_id to 0 and only
+    // ever assigns it under the same condition that would set a valid
+    // bit, so a separate valid flag would be redundant.
     logic [ID_W-1:0] sel_id;
-    logic            sel_valid;
 
     always_comb begin
-        // Declared at block top: Gowin EX3990 rejects in-block automatic
-        // declarations, and Verilator will not catch that (see CLAUDE.md).
         // Descending scan, last assignment wins -> lowest ID selected.
-        sel_id    = '0;
-        sel_valid = 1'b0;
+        sel_id = '0;
         for (int i = SRC_N - 1; i >= 1; i = i - 1) begin
-            if (pend_q[i] && enable_q[i]) begin
-                sel_id    = ID_W'(i);
-                sel_valid = 1'b1;
+            if (pend[i] && enable_q[i]) begin
+                sel_id = ID_W'(i);
             end
         end
     end
@@ -211,12 +230,11 @@ module axi4_lite_plic #(
     logic [DATA_W-1:0] rdata_mux;
     always_comb begin
         unique case (axi.araddr[4:2])
-            REG_PENDING: rdata_mux = {{(DATA_W - SRC_N) {1'b0}}, pend_q};
+            // Raw lines, bit 0 included: it records like any other bit
+            // (plic_tb pins this) but is masked out of meip and of CLAIM.
+            REG_PENDING: rdata_mux = {{(DATA_W - SRC_N) {1'b0}}, pend};
             REG_ENABLE:  rdata_mux = {{(DATA_W - SRC_N) {1'b0}}, enable_q};
-            // Plain ID: 0 means "nothing claimable" (source 0 is the
-            // reserved no-source ID and never claims), so a separate valid
-            // bit would be redundant.
-            REG_CLAIM:   rdata_mux = {{(DATA_W - ID_W) {1'b0}}, sel_valid ? sel_id : '0};
+            REG_CLAIM:   rdata_mux = {{(DATA_W - ID_W) {1'b0}}, sel_id};
             default:     rdata_mux = '0;
         endcase
     end

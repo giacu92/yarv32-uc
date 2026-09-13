@@ -33,8 +33,8 @@ import rv32_pkg::*;
  *   LSU steers addr[PERI_ADDR_BIT] internally, and the peri xbar here
  *   splits the peri bus into UART / CLINT timer / MSIP / I2C / SPI /
  *   GPIO / PLIC by base+size. The window bases come from rv32_pkg (UART_BASE /
- *   MTIMER_BASE / MSIP_PERI_ADDR / I2C_BASE / SPI_BASE) so the
- *   map is defined in exactly one place.
+ *   MTIMER_BASE / MSIP_PERI_ADDR / I2C_BASE / SPI_BASE / GPIO_BASE /
+ *   PLIC_BASE) so the map is defined in exactly one place.
  *
  * Pin assignments are in impl/pnr/rv32imac_Zicsr_Zifencei.cst.
  *
@@ -387,7 +387,20 @@ module top_module (
     // 0x1000_4000 is unmapped (it held the SDIO controller until it was
     // dropped from this branch); an access there gets a DECERR.
     // -----------------------------------------------------------------
-    localparam int unsigned PERI_N = 7;
+    localparam int unsigned PERI_N  = 7;
+
+    // Window indices: the one constant each glue block below indexes off
+    // (awvalid[W_x], bresp[2*W_x+:2], rdata[32*W_x+:32]), so a renumbered
+    // or new window cannot leave a hand-derived literal behind in one
+    // block and not the others -- a missed edit there routes one slave's
+    // response into another window with no elaboration error.
+    localparam int unsigned W_UART  = 0;
+    localparam int unsigned W_TIMER = 1;
+    localparam int unsigned W_MSIP  = 2;
+    localparam int unsigned W_I2C   = 3;
+    localparam int unsigned W_SPI   = 4;
+    localparam int unsigned W_GPIO  = 5;
+    localparam int unsigned W_PLIC  = 6;
 
     logic [         31:0] peri_awaddr;
     logic [         31:0] peri_wdata;
@@ -451,137 +464,137 @@ module top_module (
     );
 
     // Window 0: UART. Payload is broadcast; glue the per-target bits.
-    assign axi_bus_uart.awaddr   = peri_awaddr;
-    assign axi_bus_uart.wdata    = peri_wdata;
-    assign axi_bus_uart.wstrb    = peri_wstrb;
-    assign axi_bus_uart.araddr   = peri_araddr;
-    assign axi_bus_uart.awvalid  = peri_awvalid[0];
-    assign axi_bus_uart.wvalid   = peri_wvalid[0];
-    assign axi_bus_uart.bready   = peri_bready[0];
-    assign axi_bus_uart.arvalid  = peri_arvalid[0];
-    assign axi_bus_uart.rready   = peri_rready[0];
-    assign peri_awready[0]       = axi_bus_uart.awready;
-    assign peri_wready[0]        = axi_bus_uart.wready;
-    assign peri_bvalid[0]        = axi_bus_uart.bvalid;
-    assign peri_arready[0]       = axi_bus_uart.arready;
-    assign peri_rvalid[0]        = axi_bus_uart.rvalid;
-    assign peri_bresp[0+:2]      = axi_bus_uart.bresp;
-    assign peri_rresp[0+:2]      = axi_bus_uart.rresp;
-    assign peri_rdata[0+:32]     = axi_bus_uart.rdata;
+    assign axi_bus_uart.awaddr        = peri_awaddr;
+    assign axi_bus_uart.wdata         = peri_wdata;
+    assign axi_bus_uart.wstrb         = peri_wstrb;
+    assign axi_bus_uart.araddr        = peri_araddr;
+    assign axi_bus_uart.awvalid       = peri_awvalid[W_UART];
+    assign axi_bus_uart.wvalid        = peri_wvalid[W_UART];
+    assign axi_bus_uart.bready        = peri_bready[W_UART];
+    assign axi_bus_uart.arvalid       = peri_arvalid[W_UART];
+    assign axi_bus_uart.rready        = peri_rready[W_UART];
+    assign peri_awready[W_UART]       = axi_bus_uart.awready;
+    assign peri_wready[W_UART]        = axi_bus_uart.wready;
+    assign peri_bvalid[W_UART]        = axi_bus_uart.bvalid;
+    assign peri_arready[W_UART]       = axi_bus_uart.arready;
+    assign peri_rvalid[W_UART]        = axi_bus_uart.rvalid;
+    assign peri_bresp[2*W_UART+:2]    = axi_bus_uart.bresp;
+    assign peri_rresp[2*W_UART+:2]    = axi_bus_uart.rresp;
+    assign peri_rdata[32*W_UART+:32]  = axi_bus_uart.rdata;
 
     // Window 1: CLINT timer.
-    assign axi_bus_timer.awaddr  = peri_awaddr;
-    assign axi_bus_timer.wdata   = peri_wdata;
-    assign axi_bus_timer.wstrb   = peri_wstrb;
-    assign axi_bus_timer.araddr  = peri_araddr;
-    assign axi_bus_timer.awvalid = peri_awvalid[1];
-    assign axi_bus_timer.wvalid  = peri_wvalid[1];
-    assign axi_bus_timer.bready  = peri_bready[1];
-    assign axi_bus_timer.arvalid = peri_arvalid[1];
-    assign axi_bus_timer.rready  = peri_rready[1];
-    assign peri_awready[1]       = axi_bus_timer.awready;
-    assign peri_wready[1]        = axi_bus_timer.wready;
-    assign peri_bvalid[1]        = axi_bus_timer.bvalid;
-    assign peri_arready[1]       = axi_bus_timer.arready;
-    assign peri_rvalid[1]        = axi_bus_timer.rvalid;
-    assign peri_bresp[2+:2]      = axi_bus_timer.bresp;
-    assign peri_rresp[2+:2]      = axi_bus_timer.rresp;
-    assign peri_rdata[32+:32]    = axi_bus_timer.rdata;
+    assign axi_bus_timer.awaddr       = peri_awaddr;
+    assign axi_bus_timer.wdata        = peri_wdata;
+    assign axi_bus_timer.wstrb        = peri_wstrb;
+    assign axi_bus_timer.araddr       = peri_araddr;
+    assign axi_bus_timer.awvalid      = peri_awvalid[W_TIMER];
+    assign axi_bus_timer.wvalid       = peri_wvalid[W_TIMER];
+    assign axi_bus_timer.bready       = peri_bready[W_TIMER];
+    assign axi_bus_timer.arvalid      = peri_arvalid[W_TIMER];
+    assign axi_bus_timer.rready       = peri_rready[W_TIMER];
+    assign peri_awready[W_TIMER]      = axi_bus_timer.awready;
+    assign peri_wready[W_TIMER]       = axi_bus_timer.wready;
+    assign peri_bvalid[W_TIMER]       = axi_bus_timer.bvalid;
+    assign peri_arready[W_TIMER]      = axi_bus_timer.arready;
+    assign peri_rvalid[W_TIMER]       = axi_bus_timer.rvalid;
+    assign peri_bresp[2*W_TIMER+:2]   = axi_bus_timer.bresp;
+    assign peri_rresp[2*W_TIMER+:2]   = axi_bus_timer.rresp;
+    assign peri_rdata[32*W_TIMER+:32] = axi_bus_timer.rdata;
 
     // Window 2: MSIP.
-    assign axi_bus_msip.awaddr   = peri_awaddr;
-    assign axi_bus_msip.wdata    = peri_wdata;
-    assign axi_bus_msip.wstrb    = peri_wstrb;
-    assign axi_bus_msip.araddr   = peri_araddr;
-    assign axi_bus_msip.awvalid  = peri_awvalid[2];
-    assign axi_bus_msip.wvalid   = peri_wvalid[2];
-    assign axi_bus_msip.bready   = peri_bready[2];
-    assign axi_bus_msip.arvalid  = peri_arvalid[2];
-    assign axi_bus_msip.rready   = peri_rready[2];
-    assign peri_awready[2]       = axi_bus_msip.awready;
-    assign peri_wready[2]        = axi_bus_msip.wready;
-    assign peri_bvalid[2]        = axi_bus_msip.bvalid;
-    assign peri_arready[2]       = axi_bus_msip.arready;
-    assign peri_rvalid[2]        = axi_bus_msip.rvalid;
-    assign peri_bresp[4+:2]      = axi_bus_msip.bresp;
-    assign peri_rresp[4+:2]      = axi_bus_msip.rresp;
-    assign peri_rdata[64+:32]    = axi_bus_msip.rdata;
+    assign axi_bus_msip.awaddr        = peri_awaddr;
+    assign axi_bus_msip.wdata         = peri_wdata;
+    assign axi_bus_msip.wstrb         = peri_wstrb;
+    assign axi_bus_msip.araddr        = peri_araddr;
+    assign axi_bus_msip.awvalid       = peri_awvalid[W_MSIP];
+    assign axi_bus_msip.wvalid        = peri_wvalid[W_MSIP];
+    assign axi_bus_msip.bready        = peri_bready[W_MSIP];
+    assign axi_bus_msip.arvalid       = peri_arvalid[W_MSIP];
+    assign axi_bus_msip.rready        = peri_rready[W_MSIP];
+    assign peri_awready[W_MSIP]       = axi_bus_msip.awready;
+    assign peri_wready[W_MSIP]        = axi_bus_msip.wready;
+    assign peri_bvalid[W_MSIP]        = axi_bus_msip.bvalid;
+    assign peri_arready[W_MSIP]       = axi_bus_msip.arready;
+    assign peri_rvalid[W_MSIP]        = axi_bus_msip.rvalid;
+    assign peri_bresp[2*W_MSIP+:2]    = axi_bus_msip.bresp;
+    assign peri_rresp[2*W_MSIP+:2]    = axi_bus_msip.rresp;
+    assign peri_rdata[32*W_MSIP+:32]  = axi_bus_msip.rdata;
 
     // Window 3: I2C.
-    assign axi_bus_i2c.awaddr    = peri_awaddr;
-    assign axi_bus_i2c.wdata     = peri_wdata;
-    assign axi_bus_i2c.wstrb     = peri_wstrb;
-    assign axi_bus_i2c.araddr    = peri_araddr;
-    assign axi_bus_i2c.awvalid   = peri_awvalid[3];
-    assign axi_bus_i2c.wvalid    = peri_wvalid[3];
-    assign axi_bus_i2c.bready    = peri_bready[3];
-    assign axi_bus_i2c.arvalid   = peri_arvalid[3];
-    assign axi_bus_i2c.rready    = peri_rready[3];
-    assign peri_awready[3]       = axi_bus_i2c.awready;
-    assign peri_wready[3]        = axi_bus_i2c.wready;
-    assign peri_bvalid[3]        = axi_bus_i2c.bvalid;
-    assign peri_arready[3]       = axi_bus_i2c.arready;
-    assign peri_rvalid[3]        = axi_bus_i2c.rvalid;
-    assign peri_bresp[6+:2]      = axi_bus_i2c.bresp;
-    assign peri_rresp[6+:2]      = axi_bus_i2c.rresp;
-    assign peri_rdata[96+:32]    = axi_bus_i2c.rdata;
+    assign axi_bus_i2c.awaddr         = peri_awaddr;
+    assign axi_bus_i2c.wdata          = peri_wdata;
+    assign axi_bus_i2c.wstrb          = peri_wstrb;
+    assign axi_bus_i2c.araddr         = peri_araddr;
+    assign axi_bus_i2c.awvalid        = peri_awvalid[W_I2C];
+    assign axi_bus_i2c.wvalid         = peri_wvalid[W_I2C];
+    assign axi_bus_i2c.bready         = peri_bready[W_I2C];
+    assign axi_bus_i2c.arvalid        = peri_arvalid[W_I2C];
+    assign axi_bus_i2c.rready         = peri_rready[W_I2C];
+    assign peri_awready[W_I2C]        = axi_bus_i2c.awready;
+    assign peri_wready[W_I2C]         = axi_bus_i2c.wready;
+    assign peri_bvalid[W_I2C]         = axi_bus_i2c.bvalid;
+    assign peri_arready[W_I2C]        = axi_bus_i2c.arready;
+    assign peri_rvalid[W_I2C]         = axi_bus_i2c.rvalid;
+    assign peri_bresp[2*W_I2C+:2]     = axi_bus_i2c.bresp;
+    assign peri_rresp[2*W_I2C+:2]     = axi_bus_i2c.rresp;
+    assign peri_rdata[32*W_I2C+:32]   = axi_bus_i2c.rdata;
 
     // Window 4: SPI.
-    assign axi_bus_spi.awaddr    = peri_awaddr;
-    assign axi_bus_spi.wdata     = peri_wdata;
-    assign axi_bus_spi.wstrb     = peri_wstrb;
-    assign axi_bus_spi.araddr    = peri_araddr;
-    assign axi_bus_spi.awvalid   = peri_awvalid[4];
-    assign axi_bus_spi.wvalid    = peri_wvalid[4];
-    assign axi_bus_spi.bready    = peri_bready[4];
-    assign axi_bus_spi.arvalid   = peri_arvalid[4];
-    assign axi_bus_spi.rready    = peri_rready[4];
-    assign peri_awready[4]       = axi_bus_spi.awready;
-    assign peri_wready[4]        = axi_bus_spi.wready;
-    assign peri_bvalid[4]        = axi_bus_spi.bvalid;
-    assign peri_arready[4]       = axi_bus_spi.arready;
-    assign peri_rvalid[4]        = axi_bus_spi.rvalid;
-    assign peri_bresp[8+:2]      = axi_bus_spi.bresp;
-    assign peri_rresp[8+:2]      = axi_bus_spi.rresp;
-    assign peri_rdata[128+:32]   = axi_bus_spi.rdata;
+    assign axi_bus_spi.awaddr         = peri_awaddr;
+    assign axi_bus_spi.wdata          = peri_wdata;
+    assign axi_bus_spi.wstrb          = peri_wstrb;
+    assign axi_bus_spi.araddr         = peri_araddr;
+    assign axi_bus_spi.awvalid        = peri_awvalid[W_SPI];
+    assign axi_bus_spi.wvalid         = peri_wvalid[W_SPI];
+    assign axi_bus_spi.bready         = peri_bready[W_SPI];
+    assign axi_bus_spi.arvalid        = peri_arvalid[W_SPI];
+    assign axi_bus_spi.rready         = peri_rready[W_SPI];
+    assign peri_awready[W_SPI]        = axi_bus_spi.awready;
+    assign peri_wready[W_SPI]         = axi_bus_spi.wready;
+    assign peri_bvalid[W_SPI]         = axi_bus_spi.bvalid;
+    assign peri_arready[W_SPI]        = axi_bus_spi.arready;
+    assign peri_rvalid[W_SPI]         = axi_bus_spi.rvalid;
+    assign peri_bresp[2*W_SPI+:2]     = axi_bus_spi.bresp;
+    assign peri_rresp[2*W_SPI+:2]     = axi_bus_spi.rresp;
+    assign peri_rdata[32*W_SPI+:32]   = axi_bus_spi.rdata;
 
     // Window 5: GPIO.
-    assign axi_bus_gpio.awaddr   = peri_awaddr;
-    assign axi_bus_gpio.wdata    = peri_wdata;
-    assign axi_bus_gpio.wstrb    = peri_wstrb;
-    assign axi_bus_gpio.araddr   = peri_araddr;
-    assign axi_bus_gpio.awvalid  = peri_awvalid[5];
-    assign axi_bus_gpio.wvalid   = peri_wvalid[5];
-    assign axi_bus_gpio.bready   = peri_bready[5];
-    assign axi_bus_gpio.arvalid  = peri_arvalid[5];
-    assign axi_bus_gpio.rready   = peri_rready[5];
-    assign peri_awready[5]       = axi_bus_gpio.awready;
-    assign peri_wready[5]        = axi_bus_gpio.wready;
-    assign peri_bvalid[5]        = axi_bus_gpio.bvalid;
-    assign peri_arready[5]       = axi_bus_gpio.arready;
-    assign peri_rvalid[5]        = axi_bus_gpio.rvalid;
-    assign peri_bresp[10+:2]     = axi_bus_gpio.bresp;
-    assign peri_rresp[10+:2]     = axi_bus_gpio.rresp;
-    assign peri_rdata[160+:32]   = axi_bus_gpio.rdata;
+    assign axi_bus_gpio.awaddr        = peri_awaddr;
+    assign axi_bus_gpio.wdata         = peri_wdata;
+    assign axi_bus_gpio.wstrb         = peri_wstrb;
+    assign axi_bus_gpio.araddr        = peri_araddr;
+    assign axi_bus_gpio.awvalid       = peri_awvalid[W_GPIO];
+    assign axi_bus_gpio.wvalid        = peri_wvalid[W_GPIO];
+    assign axi_bus_gpio.bready        = peri_bready[W_GPIO];
+    assign axi_bus_gpio.arvalid       = peri_arvalid[W_GPIO];
+    assign axi_bus_gpio.rready        = peri_rready[W_GPIO];
+    assign peri_awready[W_GPIO]       = axi_bus_gpio.awready;
+    assign peri_wready[W_GPIO]        = axi_bus_gpio.wready;
+    assign peri_bvalid[W_GPIO]        = axi_bus_gpio.bvalid;
+    assign peri_arready[W_GPIO]       = axi_bus_gpio.arready;
+    assign peri_rvalid[W_GPIO]        = axi_bus_gpio.rvalid;
+    assign peri_bresp[2*W_GPIO+:2]    = axi_bus_gpio.bresp;
+    assign peri_rresp[2*W_GPIO+:2]    = axi_bus_gpio.rresp;
+    assign peri_rdata[32*W_GPIO+:32]  = axi_bus_gpio.rdata;
 
     // Window 6: PLIC.
-    assign axi_bus_plic.awaddr   = peri_awaddr;
-    assign axi_bus_plic.wdata    = peri_wdata;
-    assign axi_bus_plic.wstrb    = peri_wstrb;
-    assign axi_bus_plic.araddr   = peri_araddr;
-    assign axi_bus_plic.awvalid  = peri_awvalid[6];
-    assign axi_bus_plic.wvalid   = peri_wvalid[6];
-    assign axi_bus_plic.bready   = peri_bready[6];
-    assign axi_bus_plic.arvalid  = peri_arvalid[6];
-    assign axi_bus_plic.rready   = peri_rready[6];
-    assign peri_awready[6]       = axi_bus_plic.awready;
-    assign peri_wready[6]        = axi_bus_plic.wready;
-    assign peri_bvalid[6]        = axi_bus_plic.bvalid;
-    assign peri_arready[6]       = axi_bus_plic.arready;
-    assign peri_rvalid[6]        = axi_bus_plic.rvalid;
-    assign peri_bresp[12+:2]     = axi_bus_plic.bresp;
-    assign peri_rresp[12+:2]     = axi_bus_plic.rresp;
-    assign peri_rdata[192+:32]   = axi_bus_plic.rdata;
+    assign axi_bus_plic.awaddr        = peri_awaddr;
+    assign axi_bus_plic.wdata         = peri_wdata;
+    assign axi_bus_plic.wstrb         = peri_wstrb;
+    assign axi_bus_plic.araddr        = peri_araddr;
+    assign axi_bus_plic.awvalid       = peri_awvalid[W_PLIC];
+    assign axi_bus_plic.wvalid        = peri_wvalid[W_PLIC];
+    assign axi_bus_plic.bready        = peri_bready[W_PLIC];
+    assign axi_bus_plic.arvalid       = peri_arvalid[W_PLIC];
+    assign axi_bus_plic.rready        = peri_rready[W_PLIC];
+    assign peri_awready[W_PLIC]       = axi_bus_plic.awready;
+    assign peri_wready[W_PLIC]        = axi_bus_plic.wready;
+    assign peri_bvalid[W_PLIC]        = axi_bus_plic.bvalid;
+    assign peri_arready[W_PLIC]       = axi_bus_plic.arready;
+    assign peri_rvalid[W_PLIC]        = axi_bus_plic.rvalid;
+    assign peri_bresp[2*W_PLIC+:2]    = axi_bus_plic.bresp;
+    assign peri_rresp[2*W_PLIC+:2]    = axi_bus_plic.rresp;
+    assign peri_rdata[32*W_PLIC+:32]  = axi_bus_plic.rdata;
 
     // -----------------------------------------------------------------
     // I2C master (axi4_lite_i2c). Open-drain pins: the peripheral outputs
@@ -660,9 +673,12 @@ module top_module (
     // detect samples the synchronized value straight into a comparison).
     // The sync chain resets high: the .cst gives every pad PULL_MODE=UP,
     // so a released pin idles 1 and reset does not manufacture a fake
-    // falling edge. (A fake RISE per pin is unavoidable at reset with the
+    // falling edge. A fake RISE per pin is unavoidable at reset with the
     // pull-up — the peripheral's INT_STATUS comes up showing level-high
-    // pending, masked by INT_EN=0; firmware must W1C before arming.)
+    // pending, masked by INT_EN=0. W1C alone CANNOT clear those bits (a
+    // level-high pin re-pends the cycle after any W1C): firmware must
+    // retype the pin to an edge first, THEN W1C the stale bits, before
+    // arming INT_EN — the order sw/peri/plic_gpio runs.
     // -----------------------------------------------------------------
     wire [3:0] gpio_out;
     wire [3:0] gpio_oe;
@@ -700,22 +716,27 @@ module top_module (
     // -----------------------------------------------------------------
     // PLIC (axi4_lite_plic). Aggregates the peripheral level IRQs into
     // meip with cause IDs (see the peripheral's header for the claim
-    // contract). irq_i bit i = source ID i: bit 0 tied off (reserved
-    // "no source"), the four wired sources at their rv32_pkg IDs, the
-    // reserved upper IDs tied off.
+    // contract). irq_i bit i = source ID i, assigned by NAME from the
+    // rv32_pkg PLIC_SRC_* constants (their documented single source of
+    // truth): a renumbered ID or a wider PLIC_SRC_N can never silently
+    // misroute a hand-counted positional concat the way a missed edit in
+    // two files would. Bit 0 (reserved "no source") and the unwired
+    // upper IDs stay 0.
     // -----------------------------------------------------------------
+    logic [PLIC_SRC_N-1:0] plic_irq;
+    always_comb begin
+        plic_irq                = '0;
+        plic_irq[PLIC_SRC_UART] = uart_irq;
+        plic_irq[PLIC_SRC_I2C]  = i2c_irq;
+        plic_irq[PLIC_SRC_SPI]  = spi_irq;
+        plic_irq[PLIC_SRC_GPIO] = gpio_irq;
+    end
+
     axi4_lite_plic u_plic (
-        .clk_i(clk_core),
+        .clk_i (clk_core),
         .rstn_i(rstn_core),
-        .axi(axi_bus_plic.slave),
-        .irq_i({
-            11'd0,
-            gpio_irq,  // ID 4
-            spi_irq,  // ID 3
-            i2c_irq,  // ID 2
-            uart_irq,  // ID 1
-            1'b0  // ID 0: reserved
-        }),
+        .axi   (axi_bus_plic.slave),
+        .irq_i (plic_irq),
         .meip_o(meip)
     );
 

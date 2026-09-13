@@ -40,7 +40,14 @@ import rv32_pkg::*;
 * CONSEQUENCE OF THE RESET VALUES: INT_TYPE resets to level and pulled-up
 * pads read 1, so INT_STATUS reads all-1s out of reset. Harmless (INT_EN
 * resets 0, so the IRQ stays masked), and software that uses edges never
-* sees it: INT_TYPE is write-only configuration, not state.
+* sees it -- but note the W1C alone CANNOT clear these bits: a level-high
+* pin re-pends the cycle after any W1C, so firmware must first retype the
+* pin to an edge (or drop/release the line) and THEN W1C the stale bits
+* before arming INT_EN. W1C-then-arm with INT_TYPE still at level fires a
+* phantom interrupt. The sw/peri/plic_gpio oracle does it in that order.
+*
+* WIDTH bound: INT_TYPE is 2*WIDTH bits inside one DATA_W word, so
+* WIDTH <= DATA_W/2 (16 for a 32-bit bus) is an elaboration requirement.
 *
 * gpio_i is NOT synchronized by this module: the caller must hand it
 * already-synchronized pin inputs (top_module double-flops each pad, same
@@ -77,6 +84,17 @@ module axi4_lite_gpio #(
 
     localparam int DATA_W = axi.DATA_WIDTH;
     localparam int STRB_W = DATA_W / 8;
+
+    // INT_TYPE is 2*WIDTH bits in one word (see header): the module does
+    // not elaborate above that.
+    if (2 * WIDTH > DATA_W) begin : g_width_check
+        $error(
+            "axi4_lite_gpio: WIDTH=%0d needs %0d INT_TYPE bits, max DATA_W/2=%0d",
+            WIDTH,
+            2 * WIDTH,
+            DATA_W / 2
+        );
+    end
 
     // Word offsets (byte addr[4:2], word-aligned).
     localparam logic [2:0] REG_VALUE = 3'd0;
@@ -134,32 +152,46 @@ module axi4_lite_gpio #(
     assign axi.awready = !aw_seen_q && !bvalid_q;
     assign axi.wready  = !w_seen_q && !bvalid_q;
 
-    wire              aw_hs = axi.awvalid && axi.awready;
-    wire              w_hs = axi.wvalid && axi.wready;
+    wire               aw_hs = axi.awvalid && axi.awready;
+    wire               w_hs = axi.wvalid && axi.wready;
 
-    wire              aw_present = aw_seen_q || aw_hs;
-    wire              w_present = w_seen_q || w_hs;
+    wire               aw_present = aw_seen_q || aw_hs;
+    wire               w_present = w_seen_q || w_hs;
 
-    wire [       2:0] waddr_eff = aw_hs ? axi.awaddr[4:2] : awaddr_word_q;
-    wire [DATA_W-1:0] wdata_eff = w_hs ? axi.wdata : wdata_q;
-    wire [STRB_W-1:0] wstrb_eff = w_hs ? axi.wstrb : wstrb_q;
+    wire  [       2:0] waddr_eff = aw_hs ? axi.awaddr[4:2] : awaddr_word_q;
+    wire  [DATA_W-1:0] wdata_eff = w_hs ? axi.wdata : wdata_q;
+    wire  [STRB_W-1:0] wstrb_eff = w_hs ? axi.wstrb : wstrb_q;
 
-    // Every register here lives in the low WIDTH bits of its word, so a
-    // write that does not strobe byte 0 addresses no field (same rationale
-    // as axi4_lite_uart's wr_low_byte).
-    wire              wr_low_byte = wstrb_eff[0];
+    // Byte-lane write mask, replicated from the strobe: a sub-word store
+    // MERGES into the register -- strobed lanes take the new data,
+    // unstrobed lanes keep their value. The LSU shifts store data into
+    // the strobed lanes and leaves unstrobed lanes carrying shifted rs2
+    // bits (not zeros), so gating on "byte 0 strobed" would both drop a
+    // legal store to a field above byte 0 (answered OKAY, silent at
+    // WIDTH<=4 only by luck of the register widths) and ghost-write those
+    // fields from unstrobed data lanes.
+    logic [DATA_W-1:0] wr_mask;
+    always_comb begin
+        for (int b = 0; b < STRB_W; b++) begin
+            wr_mask[8*b+:8] = {8{wstrb_eff[b]}};
+        end
+    end
 
     assign axi.bvalid = bvalid_q;
     assign axi.bresp  = 2'b00;  // OKAY
     wire b_hs = axi.bvalid && axi.bready;
 
     wire do_write = aw_present && w_present && !bvalid_q;
-    wire w1c_status = do_write && (waddr_eff == REG_INT_STATUS) && wr_low_byte;
+    wire w1c_status = do_write && (waddr_eff == REG_INT_STATUS);
 
     // Set wins over W1C (see the interrupt model in the header): an edge in
-    // the clear cycle is not lost, and a level pin does not un-stick.
+    // the clear cycle is not lost, and a level pin does not un-stick. Only
+    // STROBED bits clear -- unstrobed lanes carry shifted store data, and
+    // a zero-strobe write must clear nothing.
+    logic [WIDTH-1:0] pend_clr;
+    assign pend_clr = wdata_eff[WIDTH-1:0] & wr_mask[WIDTH-1:0];
     logic [WIDTH-1:0] pend_d;
-    assign pend_d = (pend_q & ~wdata_eff[WIDTH-1:0]) | pend_set;
+    assign pend_d = (pend_q & ~pend_clr) | pend_set;
 
     always_ff @(posedge clk_i) begin
         if (!rstn_i) begin
@@ -202,21 +234,17 @@ module axi4_lite_gpio #(
 
                 unique case (waddr_eff)
                     REG_OUT:
-                    if (wr_low_byte) begin
-                        out_q <= wdata_eff[WIDTH-1:0];
-                    end
+                    out_q <= (out_q & ~wr_mask[WIDTH-1:0]) |
+                        (wdata_eff[WIDTH-1:0] & wr_mask[WIDTH-1:0]);
                     REG_DIR:
-                    if (wr_low_byte) begin
-                        dir_q <= wdata_eff[WIDTH-1:0];
-                    end
+                    dir_q <= (dir_q & ~wr_mask[WIDTH-1:0]) |
+                        (wdata_eff[WIDTH-1:0] & wr_mask[WIDTH-1:0]);
                     REG_INT_TYPE:
-                    if (wr_low_byte) begin
-                        int_type_q <= wdata_eff[2*WIDTH-1:0];
-                    end
+                    int_type_q <= (int_type_q & ~wr_mask[2*WIDTH-1:0]) |
+                        (wdata_eff[2*WIDTH-1:0] & wr_mask[2*WIDTH-1:0]);
                     REG_INT_EN:
-                    if (wr_low_byte) begin
-                        int_en_q <= wdata_eff[WIDTH-1:0];
-                    end
+                    int_en_q <= (int_en_q & ~wr_mask[WIDTH-1:0]) |
+                        (wdata_eff[WIDTH-1:0] & wr_mask[WIDTH-1:0]);
                     default: ;  // VALUE read-only; INT_STATUS handled above
                 endcase
             end

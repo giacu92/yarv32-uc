@@ -101,8 +101,8 @@ package rv32_pkg;
     // ---------------------------------------------------------------
     // Peripheral address map. These are the single source of truth for
     // the peri xbar windows: the board top and the sim top pass them to
-    // the parametric peri xbar (axi4_lite_xbar; the board instantiates
-    // N=5) rather than
+    // the parametric peri xbar (axi4_lite_xbar; both tops instantiate
+    // N=7) rather than
     // repeating literals, so the map cannot drift between the two.
     //
     //   0x1000_0000 .. 0x1000_0FFF  UART   (axi4_lite_uart)
@@ -153,10 +153,11 @@ package rv32_pkg;
     // ---------------------------------------------------------------
     // Bus address decode. The LSU steers its own accesses on
     // addr[PERI_ADDR_BIT]: =1 goes out the CPU's peri AXI4-Lite master
-    // (UART / CLINT / MSIP / future GPIO), =0 goes to the native D-mem.
+    // (UART / CLINT / MSIP / I2C / SPI / GPIO / PLIC), =0 goes to the
+    // native D-mem.
     // Fetch has its own dedicated native I-mem port (Harvard), so no
     // crossbar splits memory from peripherals; the only xbar is the
-    // 1->3 peri mux at the board top. Default bit 28 (0x1000_0000+ is
+    // parametric 1->7 peri mux at the board top. Default bit 28 (0x1000_0000+ is
     // peripheral), a conventional MMIO base.
     // Moveable here so the map lives in one place, not hardcoded in the
     // LSU or the board top.

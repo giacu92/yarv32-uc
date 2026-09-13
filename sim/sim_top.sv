@@ -523,14 +523,24 @@ module sim_top #(
     assign peri_rresp[12+:2]    = axi_bus_plic.rresp;
     assign peri_rdata[192+:32]  = axi_bus_plic.rdata;
 
-    // Source IDs (rv32_pkg::PLIC_SRC_*): 0=none, 1=UART, 2=I2C, 3=SPI,
+    // Source IDs (rv32_pkg::PLIC_SRC_*), assigned by NAME like in the
+    // board top so the two cannot drift: 0=none, 1=UART, 2=I2C, 3=SPI,
     // 4=GPIO, 5-15 reserved (tied off). MSIP/MTIP do NOT pass through
     // here — they are CLINT-style direct bits into csr_regfile.
+    logic [PLIC_SRC_N-1:0] plic_irq;
+    always_comb begin
+        plic_irq                = '0;
+        plic_irq[PLIC_SRC_UART] = uart_irq;
+        plic_irq[PLIC_SRC_I2C]  = i2c_irq;
+        plic_irq[PLIC_SRC_SPI]  = spi_irq;
+        plic_irq[PLIC_SRC_GPIO] = gpio_irq;
+    end
+
     axi4_lite_plic u_plic (
         .clk_i (clk_i),
         .rstn_i(rstn_i),
         .axi   (axi_bus_plic.slave),
-        .irq_i ({11'd0, gpio_irq, spi_irq, i2c_irq, uart_irq, 1'b0}),
+        .irq_i (plic_irq),
         .meip_o(meip)
     );
 

@@ -102,14 +102,14 @@ module i2c_tb #(
         .TX_FIFO_DEPTH(TX_FIFO_DEPTH),
         .RX_FIFO_DEPTH(RX_FIFO_DEPTH)
     ) u_i2c (
-        .clk_i     (clk_i),
-        .rstn_i    (rstn_i),
-        .axi       (axi.slave),
-        .scl_i     (scl_line),
-        .sda_i     (sda_line),
-        .scl_oe_o  (scl_oe_o),
-        .sda_oe_o  (sda_oe_o),
-        .i2c_irq_o (i2c_irq_o)
+        .clk_i    (clk_i),
+        .rstn_i   (rstn_i),
+        .axi      (axi.slave),
+        .scl_i    (scl_line),
+        .sda_i    (sda_line),
+        .scl_oe_o (scl_oe_o),
+        .sda_oe_o (sda_oe_o),
+        .i2c_irq_o(i2c_irq_o)
     );
 
 endmodule

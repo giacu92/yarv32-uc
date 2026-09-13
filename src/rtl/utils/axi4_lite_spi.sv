@@ -133,8 +133,8 @@ module axi4_lite_spi #(
     } state_e;
 
     state_e        state_q;
-    logic   [ 7:0] shift_q;   // TX shift register; MOSI = shift_q[7] (MSB first)
-    logic   [ 7:0] rx_q;      // RX capture register (separate from TX)
+    logic   [ 7:0] shift_q;  // TX shift register; MOSI = shift_q[7] (MSB first)
+    logic   [ 7:0] rx_q;  // RX capture register (separate from TX)
     logic   [ 2:0] bit_cnt_q;
     logic          first_edge_q;
     logic   [15:0] div_cnt_q;

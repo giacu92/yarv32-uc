@@ -5,14 +5,18 @@ Zicsr + trap/interrupt unit). Not part of the synthesis file list.
 
 The **Harvard** build wires the CPU to a native read-only I-mem (`+IINIT`) and
 a native byte-strobed D-mem (`+DINIT`); the AXI4-Lite peripheral bus carries
-three MMIO slaves behind the parametric 1→N xbar (`axi4_lite_xbar`, windows from
-`rv32_pkg`; unmapped → DECERR):
+seven MMIO slaves behind the parametric 1→N xbar (`axi4_lite_xbar`, windows from
+`rv32_pkg`; unmapped → DECERR) — the same map as the board top:
 
 | Slave | Base | Role |
 |---|---|---|
-| `axi4_lite_uart` | `0x1000_0000` | UART, TX+RX FIFOs, level IRQ → `mip.MEIP` |
+| `axi4_lite_uart` | `0x1000_0000` | UART, TX+RX FIFOs, level IRQ → PLIC src 1 |
 | `clint_timer` | `0x1000_1000+` | machine timer interrupt (64-bit mtime/mtimecmp) |
 | `msip_peri` | `0x1000_3000` | machine software interrupt (mip.MSIP) |
+| `axi4_lite_i2c` | `0x1000_5000` | I2C master (pins tied off in sim) |
+| `axi4_lite_spi` | `0x1000_6000` | SPI master (pins tied off in sim) |
+| `axi4_lite_gpio` | `0x1000_7000` | 4 pins, looped back onto themselves (pull-up model) |
+| `axi4_lite_plic` | `0x1000_8000` | cause/claim MEIP over the peripheral IRQs |
 
 `sim_top.sv` replicates the board top's wiring so memories can be preloaded
 and CPU per-stage taps logged. The UART is driven both ways: `uart_rxd_i` is a
@@ -124,18 +128,34 @@ Independent harnesses (no CPU) that drive a single slave from a C++ BFM.
   is dropped and latches RX_OVERRUN while queued bytes survive; reading an
   empty RX FIFO pops nothing; the IRQ is level-sensitive and gated by CTRL.
   → "146 checks, 0 failures".
-- **`hw/native_mem_tb/`** — `native_ram` protocol compliance: RVALID held
-  until RREADY, byte-strobed partial writes, back-to-back writes,
+- **`hw/native_mem_tb/`** — `native_ram` protocol compliance (32-bit config):
+  RVALID held until RREADY, byte-strobed partial writes, back-to-back writes,
   single-outstanding, posted-store commit at launch-accept, read-only ignoring
-  writes.
+  writes → 37 checks.
+- **`hw/native_ram64_tb/`** — the 64-bit / `OUTSTANDING=2` fetch-side config
+  of the same slave → 23 checks.
 - **`hw/ram_tb/`** — `axi4_lite_ram` AXI4-Lite compliance: registered/held
   BVALID + RVALID, AW-first/W-first orderings, byte strobes, back-to-back
-  writes, single outstanding.
+  writes, single outstanding → 63 checks.
+- **`hw/i2c_tb/`** — I2C master against a C++ slave-device model: transfer
+  framing and protocol compliance, IRQ conditions → 2843 checks.
+- **`hw/spi_tb/`** — SPI master mode/FIFO/IRQ compliance → 896 checks.
+- **`hw/gpio_tb/`** — GPIO register semantics: OUT/DIR, edge and level
+  events, INT_EN masking, W1C set-wins (an edge in the clear cycle is not
+  lost), strobe discipline → 88 checks.
+- **`hw/plic_tb/`** — PLIC cause/claim contract: pending tracks the lines,
+  enable masking, lowest-ID priority, the claim-without-service livelock
+  shape, source-0 exclusion → 59 checks.
 
 ```
-cd hw/uart_tb       && make run   # 146 checks, 0 failures
-cd hw/native_mem_tb && make run
-cd hw/ram_tb        && make run
+cd hw/uart_tb         && make run   # 146 checks, 0 failures
+cd hw/native_mem_tb   && make run
+cd hw/native_ram64_tb && make run
+cd hw/ram_tb          && make run
+cd hw/i2c_tb          && make run
+cd hw/spi_tb          && make run
+cd hw/gpio_tb         && make run
+cd hw/plic_tb         && make run
 ```
 
 ## Co-sim vs Spike (`cosim/`)
@@ -149,7 +169,7 @@ unified address space holds `.text`@0 and `.data`@0x2000 disjoint; the cosim
 `SPIKE_MEM` mirrors the real memory sizes so an access the hardware would
 silently alias makes Spike trap instead.
 
-- **`cosim/quicksort/`** — PASS, 29 632 retires matched, then a clean stop at
+- **`cosim/quicksort/`** — PASS, 29 293 retires matched, then a clean stop at
   the first UART MMIO access (Spike has no UART slave — a harness limit, not a
   CPU bug). Firmware rebuilt `PRINT_ARRAY=0` each run.
 - **`cosim/coremark/`** — PASS, 332 803 retires matched. The longest/broadest
@@ -437,13 +457,14 @@ make regress VPARAMS="-GLSU_LIVE_LOAD=0"    # ... against an A/B configuration
 
 ```
 TEST            RESULT DETAIL
-quicksort       PASS   44833 cyc
-div_ops         PASS   3554 cyc
+quicksort       PASS   337959 cyc
+bp_pred         PASS   425 cyc
 ...
-uart_echo       PASS   29150 cyc, TX ends GOOD
+plic_gpio       PASS   956 cyc
+uart_echo       PASS   29147 cyc, TX ends GOOD
 harvard_oracle  PASS   parks clean
 
-13 passed, 0 failed, 0 skipped
+14 passed, 0 failed, 0 skipped
 ```
 
 Three kinds of check, because the tests really do report differently, and the
@@ -471,11 +492,20 @@ still gives a useful run. The list lives in `REGRESS_TESTS` in `sim/Makefile`.
 pre-2026-09-02 divider restored it reports `div_ops FAIL marker=0xbad` and
 exits non-zero. A test harness that has never failed has not been tested.
 
-- **`sw/peri/uart_echo/`** — the only end-to-end test of MEIP
+- **`sw/peri/uart_echo/`** — the first end-to-end test of MEIP
   (`uart_irq_o`→`meip_i`→`mip.MEIP`→`trap_unit` + `wfi` wake). Echoes 4 bytes
   by polling, then 4 more from a machine-interrupt handler. Result @0x3000.
   Doubles as the board bring-up program.
   `UART_RX='abcdefgh' make run RUN_ARGS=...` → "ECHO / abcd / IRQ / efgh / GOOD".
+- **`sw/peri/plic_gpio/`** — GPIO+PLIC end-to-end MEIP oracle: a self-driven
+  rise edge on pin 0 → GPIO INT_STATUS sticky → PLIC pending → meip → trap;
+  the handler must read CLAIM (= GPIO's source ID, 4) and then service by
+  W1C-ing INT_STATUS, which drops the line ("claim = complete" via servicing).
+  Also pins the reset contract: pulled-up pads + level-high reset type leave
+  INT_STATUS all-1s out of reset, and a W1C alone cannot clear them —
+  firmware must retype the pin to an edge first, then W1C, before arming.
+  Result @0x3000; debug fields (claim ID, IRQ count, bad mcause) in `.data`
+  for board post-mortem.
 - **`sw/isa/ifault/`** — jumps to 0x100000 (outside the 16 KiB I-mem), checks
   one trap with `mcause=1`, `mtval` = jumped-to address. Handler rewrites
   `mepc` (the address is still unfetchable).
@@ -543,7 +573,7 @@ filled" from "the poll never returned" when a board goes quiet mid-line.
   stop, UART RX frame driver).
 - `imem.hex`/`dmem.hex` — Harvard oracle preload.
 - `Makefile` — build/run rules (`RUN_ARGS` forwards plusargs).
-- `hw/{native_mem_tb,ram_tb,uart_tb}/` — compliance tests.
+- `hw/{native_mem_tb,native_ram64_tb,ram_tb,uart_tb,i2c_tb,spi_tb,gpio_tb,plic_tb}/` — compliance tests.
 - `cosim/` — shared co-sim assets (`cosim_diff.py`, `build_spike.sh`) +
   `quicksort/`, `coremark/`, `ecall/` harnesses.
 - `sw/` — C → image flow (see `sw/README.md`) and the oracles above.

@@ -1,6 +1,6 @@
 # YARV32-uC: Yet Another RISC-V uController
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/giacu92/yarv-uc)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/giacu92/yarv32-uc)
 
 An **RV32IMAC + Zicsr + Zifencei** soft-processor core for a **Gowin
 GW2AR-18C** FPGA (QFN88) on a Tang Nano 20k. Hobby/learning project, built
@@ -129,8 +129,11 @@ instruction (2), ebreak (3), load/store misaligned (4/6), ecall-M (11).
 direct and vectored mode. A trapping instruction is not retired.
 
 Three interrupt sources: **MSIP** (`msip_peri` MMIO @0x1000_3000), **MTIP**
-(`clint_timer` @0x1000_1000+, 64-bit mtime/mtimecmp), **MEIP** (UART level
-IRQ). Priority MEI > MSI > MTI. A dedicated trap-write port updates
+(`clint_timer` @0x1000_1000+, 64-bit mtime/mtimecmp), **MEIP** — a minimal
+PLIC-style controller @0x1000_8000 that aggregates the peripheral level IRQs
+(UART / I2C / SPI / GPIO) into meip with cause IDs (CLAIM read, fixed
+lower-ID-wins priority; ENABLE resets all-ones so pre-PLIC firmware runs
+unchanged). Priority MEI > MSI > MTI. A dedicated trap-write port updates
 mepc/mcause/mtval/mstatus atomically on entry.
 
 ### Integration
@@ -138,9 +141,11 @@ mepc/mcause/mtval/mstatus atomically on entry.
 The CPU exposes three ports: native `imem` (read-only), native `dmem`
 (byte-strobed), and an AXI4-Lite master for peripherals. Native→AXI
 conversion lives inside the CPU, so the board top is pure point-to-point
-wiring. Peripherals sit behind a 1→3 crossbar with a DECERR terminator for
-unmapped addresses — UART (TX+RX FIFOs, level IRQ), machine timer, and the
-software-interrupt register.
+wiring. Peripherals sit behind a parametric 1→7 crossbar with a DECERR
+terminator for unmapped addresses — UART (TX+RX FIFOs, level IRQ), I2C and
+SPI masters, GPIO (4 header pins, edge/level interrupts), machine timer,
+the software-interrupt register, and the PLIC-style interrupt controller
+feeding MEIP.
 
 ### Clocking
 
@@ -209,7 +214,8 @@ src/rtl/pkg/   rv32_pkg.sv          types, opcodes, de_t D/E control struct
 src/rtl/core/  pipeline stages + CPU top + reg file + ALU + trap unit + board top
 src/rtl/bus/   AXI4-Lite interface + master bridge + peripheral crossbar
 src/rtl/utils/ native_ram (Harvard I/D-mem), msip_peri, clint_timer,
-               axi4_lite_uart, axi4_lite_xbar (parametric 1→N)
+               axi4_lite_uart, axi4_lite_i2c, axi4_lite_spi,
+               axi4_lite_gpio, axi4_lite_plic, axi4_lite_xbar (parametric 1→N)
 src/phys/      pin assignment (.cst) + timing constraints (.sdc)
 impl/          Gowin EDA project + synthesis/PnR Tcl + reports
 sim/           Verilator sim, compliance tests, Spike co-sim, firmware oracles
@@ -242,8 +248,9 @@ See `CLAUDE.md` for the remote-build workflow and the Gowin CLI quirks.
 
 Done: Harvard split, LSU + forwarding, Zicsr, M-mode traps with all three
 interrupt sources, UART with FIFOs, silicon bring-up, CoreMark, 64-bit
-2-outstanding fetch with instruction buffer, branch predictor, and 50 MHz
-closure with the predictor enabled.
+2-outstanding fetch with instruction buffer, branch predictor, 50 MHz
+closure with the predictor enabled, I2C and SPI masters, GPIO with edge and
+level interrupts, and the PLIC-style cause/claim controller for MEIP.
 
 Next, in order:
 
@@ -254,12 +261,9 @@ Next, in order:
 2. **Cache over the in-package 8 MiB SDRAM** — write-back set-associative
    I/D cache behind the native interfaces. Buys capacity (programs above
    16 KiB), not speed: BSRAM already answers in one cycle at a 100% hit rate.
-3. **GPIO** — direction/output/input registers plus interrupt.
-4. **PLIC-style interrupt controller** — MEIP is one ORed level with no cause
-   register, so an ISR must poll once there is more than one external source.
-5. **Illegal-CSR-access trap** — unimplemented CSRs read 0 / ignore writes.
-6. **Vectored-mode interrupt co-sim** — only direct mode is co-simulated.
-7. **RVC sequential spanning bubble** — the branch-target case is already
+3. **Illegal-CSR-access trap** — unimplemented CSRs read 0 / ignore writes.
+4. **Vectored-mode interrupt co-sim** — only direct mode is co-simulated.
+5. **RVC sequential spanning bubble** — the branch-target case is already
    zero-bubble; the fall-through case still costs one cycle and needs a wider
    F/D or dual-issue.
 
@@ -269,7 +273,8 @@ accesses.
 ## Known limitations
 
 - Machine mode only (no S/U, no medeleg/mideleg, no PMP).
-- MEIP is a single ORed level — no PLIC, so an ISR polls for the source.
+- MEIP goes through a minimal PLIC (cause/claim, fixed lower-ID priority) —
+  no per-source priority or threshold registers.
 - Unimplemented CSR addresses silently read 0 / ignore writes.
 - `fence.i` is a nop; no self-modifying code.
 - Forward path is distance-1 only (correct: in-order, at most one writeback

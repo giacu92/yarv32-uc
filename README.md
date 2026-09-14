@@ -147,6 +147,37 @@ SPI masters, GPIO (4 header pins, edge/level interrupts), machine timer,
 the software-interrupt register, and the PLIC-style interrupt controller
 feeding MEIP.
 
+### Pin assignment (Tang Nano 20k, GW2AR-18C QFN88)
+
+Canonical source is `src/phys/rv32imac_Zicsr_Zifencei.cst`; this table is
+its readable form. All IOs are LVCMOS33.
+
+| Signal | Pin | Electrical | Board / header |
+|---|---|---|---|
+| `clk_i` | 10 | no pull | 25 MHz MS5351M CLK0 reference |
+| `rst_i` | 88 | pull-down | reset button S1 (active-high: pressed = reset) |
+| `uart_txd_o` | 69 | DRIVE=8 | onboard BL616 USB-UART bridge |
+| `uart_rxd_i` | 70 | pull-up | onboard BL616 USB-UART bridge |
+| `i2c_scl_io` | 25 | pull-up, open-drain | I2C master clock |
+| `i2c_sda_io` | 26 | pull-up, open-drain | I2C master data |
+| `spi_sck_o` | 27 | DRIVE=8 | SPI master clock |
+| `spi_mosi_o` | 28 | DRIVE=8 | SPI master data out |
+| `spi_miso_i` | 29 | pull-up | SPI master data in |
+| `spi_cs_n_o` | 30 | DRIVE=8 | SPI chip select (software-managed) |
+| `gpio_io[0]` | 41 | pull-up, DRIVE=8 | free right-header IO |
+| `gpio_io[1]` | 42 | pull-up, DRIVE=8 | free right-header IO |
+| `gpio_io[2]` | 71 | pull-up, DRIVE=8 | free right-header IO |
+| `gpio_io[3]` | 72 | pull-up, DRIVE=8 | free right-header IO |
+| `led_o[0]` | 15 | pull-up, DRIVE=8 | onboard LED — mirrors GPIO0 when DIR=out |
+| `led_o[1]` | 16 | pull-up, DRIVE=8 | onboard LED — slow counter bit |
+| `led_o[2]` | 17 | pull-up, DRIVE=8 | onboard LED — slow counter bit |
+| `led_o[3]` | 18 | pull-up, DRIVE=8 | onboard LED — slow counter bit |
+
+The I2C pins carry only the weak internal pull-up as a fallback — a real
+bus needs external pull-ups. GPIO pins read a defined 1 when released or
+unconnected, which matches the sim's loopback model. PIN80–85 (the onboard
+microSD slot) are free; the SDIO controller that used them was dropped.
+
 ### Clocking
 
 A 25 MHz MS5351M reference feeds an on-chip rPLL that drives the fabric at

@@ -68,7 +68,7 @@ module execute_stage #(
     // rv32_pkg::MUL_SHARED_DSP is 0. The default used to be 1, i.e. the
     // measured-worse form, which only stayed harmless because every real
     // instantiation overrides it from the package.
-    parameter int unsigned MUL_SHARED_DSP = 0,
+    parameter int unsigned MUL_SHARED_DSP = 1,
     // Whether an aligned D-mem LOAD launches its bus request live from the
     // effective address in EX_IDLE.
     //   1 = yes (default). Saves one cycle on every D-mem load; the address

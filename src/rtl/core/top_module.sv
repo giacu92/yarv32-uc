@@ -321,7 +321,7 @@ module top_module (
         // CoreMark .text is 11.1 KiB (of 16) -> 1423 64-bit words, under the
         // 2048-deep I-mem; it exercises the fetch/buffer path heavily, which
         // is what a timing-closure build must stress.
-        .INIT_FILE  ("sim/sw/coremark/build/imem.hex")
+        .INIT_FILE  ("sim/sw/dhrystone/build/imem.hex")
     ) u_imem (
         .clk_i       (clk_core),
         .rstn_i      (rstn_core),
@@ -349,7 +349,7 @@ module top_module (
         .DATA_WIDTH (32),
         .READ_ONLY  (0),
         .OUTSTANDING(1),                                // LSU single-outstanding
-        .INIT_FILE  ("sim/sw/coremark/build/dmem.hex")
+        .INIT_FILE  ("sim/sw/dhrystone/build/dmem.hex")
     ) u_dmem (
         .clk_i       (clk_core),
         .rstn_i      (rstn_core),

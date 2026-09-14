@@ -36,7 +36,7 @@ module alu #(
     // MUL_SHARED_DSP = 0 overrides it on every real instantiation -- a
     // standalone instance of this module, or a new one that forgot to thread
     // the knob, silently got the slower form.
-    parameter int unsigned MUL_SHARED_DSP = 0
+    parameter int unsigned MUL_SHARED_DSP = 1
 ) (
     input wire clk_i,
     input wire rst_ni,

@@ -28,7 +28,7 @@ import rv32_pkg::*;
  * speculative outcomes. In-order single-issue means a squashed instruction
  * never resolves, so there is no wrong-path contamination of the PHT/GHR/RAS.
  * The PHT update is indexed by the gshare snapshot carried in de_t
- * (pred_pht_index = pc[7:1]^ghr at decode time), not the live GHR — an older
+ * (pred_pht_index = pc[IDX_W:1]^ghr at lookup time), not the live GHR — an older
  * branch may have shifted the GHR between this branch's decode and its
  * resolve, and the update must use the history the branch was predicted with.
  *
@@ -108,27 +108,45 @@ module branch_predictor (
     localparam int unsigned RAS_DEPTH = BP_RAS_DEPTH;
     localparam int unsigned RAS_PTR_W = $clog2(RAS_DEPTH);
 
-    // The PHT is a FLOP ARRAY with a LUT-mux read -- 128x2 = 256 FF -- and
-    // that is not a choice, it is the only thing this device can build here.
-    // Both of its reads are ASYNCHRONOUS (the decode lookup is combinational,
-    // and the train-side read-modify-write reads a second address in the cycle
-    // it writes), while Gowin's LUT-RAM/SSRAM is synchronous-read only
-    // (SUG949E §8.2, the same limit that keeps the regfile on BSRAM -- see
-    // reg_file.sv). So there is no RAM primitive to map onto.
+    // STORAGE. This note used to state flatly that the table is necessarily a
+    // flop array behind a LUT mux -- 128x2 = 256 FF -- because both reads are
+    // ASYNCHRONOUS (the decode lookup is combinational, and the train-side
+    // read-modify-write reads a second address in the cycle it writes) while
+    // Gowin's LUT-RAM/SSRAM is synchronous-read only (SUG949E 8.2, the same
+    // limit that keeps the regfile on BSRAM -- see reg_file.sv).
+    //
+    // AT BP_PHT_DEPTH=512 THAT IS NO LONGER WHAT GETS BUILT. The 2026-09-14
+    // PnR report places u_cpu/u_bp/pht_q_pht_q_0_0_s on a BSRAM site, driven
+    // by ADA[1:9] address pins from the registered de_q.pred_pht_index, while
+    // bp_train.pht_index[*] still fans out to 514 loads and u_bp/n1326_3 to
+    // 513. So synthesis replicated the array and put at least one copy in
+    // block RAM. The plausible reading: the train RMW -- a registered index,
+    // read-then-write at one address -- maps onto a read-before-write BSRAM
+    // port, and the four asynchronous push reads stay distributed.
+    //
+    // THAT READING IS INFERENCE FROM A TIMING REPORT, NOT VERIFIED. It
+    // matters because a BSRAM read output is registered, whereas the RTL
+    // below needs pht_train_ctr combinationally in the same cycle it writes.
+    // If synthesis got that wrong, training reads a stale counter: prediction
+    // accuracy degrades, nothing traps, and SIMULATION CANNOT SEE IT, because
+    // sim elaborates this RTL and not the netlist. That is the same class as
+    // the 2026-09-01 board reboot loop. Confirm against the .vg netlist and
+    // the synthesis resource table before trusting a board run.
+    //
+    // Consequences if it IS block RAM: depth is no longer priced like a wide
+    // mux, so 1024 becomes worth a run; and the 6.1 ns read measured at 512
+    // entries on 2026-08-31, which forced the resize to 128, was a
+    // measurement of the FLOP form and does not describe this build.
     //
     // This array carried `(* ram_style = "distributed" *)` and
     // `(* syn_ramstyle = "distributed" *)` until 2026-08-31. Both were dead:
     // ram_style is the Vivado spelling GowinSynthesis ignores outright, and
     // "distributed" is not one of its accepted values either (they carry the
     // _ram suffix -- block_ram / distributed_ram), so it answered
-    // "EX0200: Property syn_ramstyle set invalid for pht_q" and inferred flops
-    // regardless. Removing both attributes changed neither the resource
+    // "EX0200: Property syn_ramstyle set invalid for pht_q" and inferred
+    // flops regardless. Removing both attributes changed neither the resource
     // report nor PnR, which is the expected result of deleting a rejected
-    // property. Everything measured about this table -- the 6.1 ns read at 512
-    // entries that forced the resize to 128, and the 50 MHz closure at 128 --
-    // was therefore measured on flops, and the depth is a timing parameter for
-    // the same reason a wide mux is: the read feeds fetch's launch/inflight
-    // logic in the same cycle.
+    // property -- and is NOT evidence about what it infers at depth 512.
     //
     // No reset port: the weak-not-taken initialisation is an `initial` block,
     // which an FPGA flop honours as its power-up value. Harmless by

@@ -69,12 +69,12 @@ module rv32imac_zicsr_zifencei #(
     // real instantiation passes. It used to default to 1 here -- a form that
     // has never been through PnR -- so a standalone instance, or a new one
     // that forgot to thread the knob, got an unmeasured configuration.
-    parameter int BP_PUSH_LOOKUP = 0,
+    parameter int BP_PUSH_LOOKUP = 1,
     // Forwarded to fetch: whether the EXECUTE redirect launches its I-mem read
     // in the redirect cycle. 0 (default) keeps the register file off the I-mem
     // address pins at a cost of 1 cycle per mispredict/trap; 1 restores the
     // 2026-08-31 form. See fetch_stage.sv.
-    parameter int EXEC_REDIR_INCYCLE = 0,
+    parameter int EXEC_REDIR_INCYCLE = 1,
     // Forwarded to execute: whether an aligned D-mem load launches its bus
     // request live from alu_result. 0 captures every bus op, which is the
     // pre-2026-09-01 LSU -- the safe fallback. See execute_stage.sv.

@@ -4,6 +4,29 @@
 
 package rv32_pkg;
 
+    // Selects the Gowin hardware build. Its ONE consumer is the `ifdef GOWIN
+    // in top_module.sv that instantiates the rPLL primitive; undefined, that
+    // block falls through to `assign clk_core = clk_i`, the 25 MHz bypass.
+    //
+    // It lives here, not in the project file, so the board build cannot be
+    // configured differently from the package that feeds it -- the same
+    // single-source-of-truth reason UART_CLK_HZ and the A/B knobs are here.
+    //
+    // Two properties to keep in mind, because a `define is not package-scoped
+    // and does not behave like the localparams around it:
+    //   * It leaks to every file compiled AFTER this one in the same
+    //     compilation unit. That is exactly why top_module sees it. It also
+    //     means any future `ifdef GOWIN in a file the SIM compiles would
+    //     silently take the hardware branch -- sim_top's file list includes
+    //     this package. Today nothing else tests it, and sim never compiles
+    //     top_module.sv, so the sim is unaffected.
+    //   * top_module.sv opens with `resetall, which resets compiler
+    //     directives. That it still works is not theory: the 2026-09-14
+    //     GowinSynthesis run placed the rPLL (pll/CLKOUT on PLL_L[1], the
+    //     clk_core generated clock at 20 ns), so the macro does survive into
+    //     that file under this toolchain.
+    `define GOWIN
+
     localparam int unsigned XLEN = 32;
     localparam int unsigned STRB_WIDTH = XLEN / 8;
 
@@ -25,26 +48,58 @@ package rv32_pkg;
 
     // MUL structure A/B knob (see alu.sv). Functionally identical either way,
     // so this is a timing knob only -- the retire stream must not move.
-    // MEASURED: 0 is the better one. 1 cost 2.52 ns on the 2026-09-01 PnR
-    // ladder (49.6 -> 44.1 MHz); the note in alu.sv has the breakdown.
-    localparam int unsigned MUL_SHARED_DSP = 0;
+    //
+    // THE VERDICT ON THIS KNOB REVERSED, and the reversal is the lesson.
+    // On the 2026-09-01 tree, 1 cost 2.52 ns (PnR ladder 49.6 -> 44.1 MHz;
+    // alu.sv has the per-cell breakdown) and 0 shipped. On the 2026-09-14
+    // FROZEN tree, 1 ships and the design closed at 53.259 MHz -- because the
+    // ALU is no longer on any of the 25 worst setup paths. No DSP, no lsu_ea
+    // adder, no wb_data mux, no regfile startpoint appears in the setup
+    // report at all; all 25 start at a fetch buffer head_q bit and end in
+    // decode, fetch, or the I-mem address pins. The register file appears
+    // only in HOLD paths (de_q.rd -> regs ADA, +0.211 ns).
+    //
+    // So the -2.52 ns was real and is now worth nothing: it was delay on a
+    // path that stopped binding. Same rule as PnR run 6 (1.92 ns removed from
+    // the D-mem address mux for zero gain), pointing the other way. A knob
+    // measured against one limiter says nothing once the limiter moves --
+    // re-measure, do not inherit the verdict.
+    localparam int unsigned MUL_SHARED_DSP = 1;
 
     // PHT lookup placement A/B knob: -GBP_PUSH_LOOKUP=0 reads the PHT at
     // decode with the live GHR (the original form); 1 reads it at
     // instruction-buffer push time and carries the bit in the entry. Unlike
     // MUL_SHARED_DSP this one DOES move the retire stream -- the push-time
     // read sees a slightly older GHR, so predictions differ.
-    localparam int unsigned BP_PUSH_LOOKUP = 0;
+    //
+    // 1 SHIPS as of 2026-09-14, but it is worth nothing on its own: measured
+    // alone at BP_PHT_DEPTH=128 it moved CoreMark by 0.00 CM/MHz and cost
+    // 3 MHz of Fmax (53.096 -> 50.059). Its whole value is taking the array
+    // read off the decode -> fetch redirect path, which is what makes
+    // BP_PHT_DEPTH=512 affordable. Enable the two together or neither.
+    localparam int unsigned BP_PUSH_LOOKUP = 1;
 
-    // -GEXEC_REDIR_INCYCLE=1 restores the 2026-08-31 form where an execute
-    // redirect also launches its read in the redirect cycle. Default 0 keeps
-    // the register file off the I-mem address pins (see fetch_stage.sv) and
-    // costs 1 cycle per mispredict / trap / mret.
-    // Timing closure on 2026-09-03 (wrt BT_EN=1, LSU_LIVE_LOAD=1, others=0) 
-    // from 52.890 MHz to 50.065 MHz. Benchmarks score:
-    // - CoreMark: from 2.33 to 2.37 CoreMark/MHz
-    // - Dhrystone: from 52.02 to 52.40 DMIPS
-    localparam int unsigned EXEC_REDIR_INCYCLE = 0;
+    // -GEXEC_REDIR_INCYCLE=1 has an execute redirect also launch its read in
+    // the redirect cycle (the 2026-08-31 form); 0 waits for pc_q and costs
+    // 1 cycle per mispredict / trap / mret. 1 SHIPS as of 2026-09-14.
+    //
+    // It was 0 from 2026-09-01 (plan item 1e) because PnR run 2 put all eight
+    // worst paths on regfile -> forward -> JALR adder -> branch_target ->
+    // issue_addr -> u_imem AD[*], i.e. the register file reaching a BSRAM
+    // address pin. On the frozen tree that leg is gone: the only paths
+    // reaching u_imem AD[*] start at a fetch head_q bit and arrive through
+    // pred_dir_target (src_pc + pred_imm), which is PC- and flop-derived, and
+    // they sit at +1.637 ns or better. The rule item 1e established still
+    // holds -- only a flop-or-PC-derived address belongs on issue_addr -- it
+    // is simply no longer violated, so the cycle can be taken back.
+    //
+    // Cycle effect, same images: CoreMark 2.33 -> 2.37 CM/MHz, Dhrystone
+    // 52.02 -> 52.40 DMIPS, quicksort +2.9% when off. An earlier note here
+    // paired those with a 52.890 -> 50.065 MHz Fmax DROP measured 2026-09-03.
+    // That was a different netlist (before the parametric xbar and
+    // GPIO/PLIC) and the sign did not survive re-measurement on this tree --
+    // do not carry it forward.
+    localparam int unsigned EXEC_REDIR_INCYCLE = 1;
 
     // LSU launch shape. 1 = an aligned D-mem LOAD launches live from
     // alu_result (one cycle cheaper per load); 0 = every bus op captures into
@@ -61,24 +116,41 @@ package rv32_pkg;
     // pc[BP_PHT_IDX_W:1] ^ ghr, a full-width xor with no padding on either
     // side, and the push-time lookup slices ghr the same way.
     //
-    // 128 entries x 2 bits, 7 bits of global history. Sized by timing, not
-    // by accuracy: the table is read combinationally at decode and that read
-    // feeds fetch's launch/inflight logic in the same cycle, so PHT depth is
-    // directly on a critical path (2026-08-31 PnR: a 512-entry table put
-    // pht_index -> read output at 6.1 ns, 3.36 ns of it pure routing across
-    // the spread-out primitives, landing that path at -1.024 ns). The table
-    // is a flop array read through a LUT mux, so depth costs what a wide mux
-    // costs -- Gowin has no async-read RAM to put it in (see the storage note
-    // in branch_predictor.sv).
+    // 512 entries x 2 bits, 9 bits of global history, as of the 2026-09-14
+    // freeze. DEPTH STOPPED BEING A TIMING PARAMETER when BP_PUSH_LOOKUP went
+    // to 1: the array is read at instruction-buffer push time off req_pc_q /
+    // pc_q (flops, a whole cycle to themselves) and decode reads a flop out
+    // of the buffer entry, so the read no longer feeds fetch's launch and
+    // inflight logic in the same cycle. Enable the two together or neither --
+    // at BP_PUSH_LOOKUP=0 a 512-entry table measured pht_index -> read output
+    // at 6.1 ns, 3.36 ns of it pure routing, and landed that path at
+    // -1.024 ns (2026-08-31), which is what forced the resize to 128.
     //
     // Measured CoreMark cost of shrinking it (ITERATIONS=4, -O3):
-    //   512 x 9 -> 2004284 ticks, 18608 mispredicts   (1.99 CoreMark/MHz)
+    //   512 x 9 -> 2004284 ticks, 18608 mispredicts
     //   256 x 8 -> 2010433 ticks, 23601 mispredicts   (+0.31% cycles)
     //   128 x 7 -> 2017387 ticks, 24944 mispredicts   (+0.65% cycles)
-    // 0.65% of cycles is cheap for ~1 ns of slack -- 1 MHz is worth 2%. Move
-    // up to 256 (or back to 512) only if PnR says the slack is there; the
-    // three localparams below plus nothing else need to change, since the
-    // index width and every struct field carrying it are derived.
+    // On the frozen build 512 x 9 with push lookup measures 416331 cyc/iter
+    // (2.40 CoreMark/MHz) against 128 x 7's 2.37, and Fmax 53.259 MHz.
+    // The three localparams below plus nothing else need to change: the index
+    // width and every struct field carrying it are derived from them.
+    //
+    // STORAGE, AND IT IS NOT WHAT THIS FILE USED TO CLAIM. The note here (and
+    // in branch_predictor.sv) asserted the table is necessarily a flop array
+    // behind a LUT mux because both reads are asynchronous and Gowin has no
+    // async-read RAM. At 512 that is no longer what gets built: the PnR
+    // report places u_cpu/u_bp/pht_q_pht_q_0_0_s on a BSRAM site with ADA[1:9]
+    // address pins, while bp_train.pht_index[*] still fans out to 514 loads
+    // and u_bp/n1326_3 to 513 -- i.e. synthesis replicated the array and put
+    // at least one copy in block RAM. The plausible reading is that the train
+    // read-modify-write (a registered index, read-then-write at one address)
+    // maps to a read-before-write BSRAM port while the four asynchronous push
+    // reads stay distributed. THAT IS INFERENCE, NOT VERIFIED -- a BSRAM read
+    // output is registered and the RTL wants pht_train_ctr combinationally in
+    // the write cycle, so a wrong inference here trains off a stale counter,
+    // degrades prediction silently, and simulation cannot see it (sim runs the
+    // RTL, not the netlist). Confirm against the .vg netlist and the synthesis
+    // resource table before trusting a board run. See Open work in CLAUDE.md.
     //
     // The original 64x2 / 6-bit table was aliasing-bound, not history-bound:
     // a trace-driven model over the real retire streams put a 64-entry gshare
@@ -87,15 +159,9 @@ package rv32_pkg;
     //
     // GHR width == index width is deliberate: gshare xors the full history
     // into the full index, so a shorter GHR wastes index bits.
-    //
-    // If the accuracy of a big table is ever wanted back without the timing
-    // cost, the structural fix is to look the PHT up at instruction-buffer
-    // PUSH time and carry the 1-bit prediction in the buffer entry -- that
-    // takes the RAM read off the decode->fetch path entirely, at the price of
-    // a slightly staler GHR.
-    localparam int unsigned BP_PHT_DEPTH = 128;
-    localparam int unsigned BP_PHT_IDX_W = 7;  // $clog2(BP_PHT_DEPTH)
-    localparam int unsigned BP_GHR_W = 7;  // == BP_PHT_IDX_W (full-width gshare)
+    localparam int unsigned BP_PHT_DEPTH = 512;
+    localparam int unsigned BP_PHT_IDX_W = 9;  // $clog2(BP_PHT_DEPTH)
+    localparam int unsigned BP_GHR_W = 9;  // == BP_PHT_IDX_W (full-width gshare)
     localparam int unsigned BP_RAS_DEPTH = 8;
 
     // ---------------------------------------------------------------
@@ -280,7 +346,7 @@ package rv32_pkg;
         logic                    pht_taken;  // PHT[counter].MSB (predict taken)
         logic                    ras_valid;  // RAS non-empty
         logic [XLEN-1:0]         ras_top;    // RAS top (predicted return target)
-        logic [BP_PHT_IDX_W-1:0] pht_index;  // pc[7:1]^ghr snapshot (carried in de_t)
+        logic [BP_PHT_IDX_W-1:0] pht_index;  // pc[IDX_W:1]^ghr snapshot (carried in de_t)
     } bp_lookup_rsp_t;
 
     // Execute -> predictor: training at resolve. Kind bits are mutually
@@ -529,7 +595,7 @@ package rv32_pkg;
         // a control-flow instr decode attempted to predict; pred_taken is the
         // speculated direction; pred_target is the taken target (valid when
         // pred_taken); pred_source attributes the hit; pred_pht_index is the
-        // gshare index snapshot (pc[7:1]^ghr) taken at decode, carried so the
+        // gshare index snapshot (pc[IDX_W:1]^ghr) taken at decode, carried so the
         // PHT update at resolve uses the history the branch was predicted with
         // (an older branch may have shifted the GHR in between). Execute
         // compares these against the resolved outcome -> mispredict.

@@ -101,7 +101,7 @@ module decode_stage #(
     //       what rv32_pkg ships -- 1 has never been through PnR).
     // Functionally safe either way -- de_t carries the index the bits were
     // read at, so training always updates the entry the lookup used.
-    parameter int BP_PUSH_LOOKUP = 0
+    parameter int BP_PUSH_LOOKUP = 1
 ) (
     input wire clk_i,
     input wire rstn_i,

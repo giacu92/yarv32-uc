@@ -194,7 +194,7 @@ module fetch_stage #(
     // there, and pc_q / pc_next_block are flops. Dropping branch_addr_i from
     // that mux removes the whole leg and leaves the predicted redirect -- the
     // common case at 88-99% accuracy -- still launching in-cycle.
-    parameter int EXEC_REDIR_INCYCLE = 0
+    parameter int EXEC_REDIR_INCYCLE = 1
 ) (
     input wire clk_i,
     input wire rstn_i,

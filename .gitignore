@@ -4,7 +4,8 @@ impl/pnr/cmd.do
 impl/pnr/*.vg
 impl/pnr/*.bin
 impl/pnr/*.binx
-impl/pnr/*.fs
+!impl/pnr/*.fs
+impl/pnr/*.posp
 impl/pnr/*.db
 impl/pnr/*.log
 impl/pnr/*.html

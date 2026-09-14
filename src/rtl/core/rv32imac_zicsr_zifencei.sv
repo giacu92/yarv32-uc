@@ -83,8 +83,8 @@ module rv32imac_zicsr_zifencei #(
     input wire clk_i,
     input wire rstn_i,
 
-    input  wire [XLEN-1:0] boot_addr_i,  // Reset vector boot address
-    output wire            dbg_stall_o,  // decode or execute stage stall
+    input wire [XLEN-1:0] boot_addr_i,  // Reset vector boot address
+    //output wire            dbg_stall_o,  // decode or execute stage stall
 
     // AXI4-Lite master for peripherals only. Fetch and LSU data RAM use
     // the native imem_/dmem_ ports below (no AXI for memory).
@@ -472,10 +472,10 @@ module rv32imac_zicsr_zifencei #(
     // ===================================================================
 
     // Aggregate stall tap for the board / sim (functional only).
-    assign dbg_stall_o = dec_stall | ex_stall;
+    //assign dbg_stall_o = dec_stall | ex_stall;
 
-    assign imem_req_o  = fe_req;
-    assign fe_rsp      = imem_rsp_i;
+    assign imem_req_o = fe_req;
+    assign fe_rsp     = imem_rsp_i;
 
 endmodule
 

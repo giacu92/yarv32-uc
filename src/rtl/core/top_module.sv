@@ -229,7 +229,7 @@ module top_module (
     assign axi_bus_plic.aresetn  = rstn_core;
 
     // Debug tap: decode or execute stage stall.
-    wire         dbg_stall;
+    //wire         dbg_stall;
 
     // -----------------------------------------------------------------
     // Native memory ports. Fetch and the LSU each get a dedicated BSRAM;
@@ -283,7 +283,7 @@ module top_module (
         .clk_i      (clk_core),
         .rstn_i     (rstn_core),
         .boot_addr_i(32'h0000_0000),
-        .dbg_stall_o(dbg_stall),
+        //.dbg_stall_o(dbg_stall),
         .axi_peri   (axi_bus_peri.master),
         .imem_req_o (imem_req),
         .imem_rsp_i (imem_rsp),
@@ -301,10 +301,10 @@ module top_module (
     // $readmemh in sim_top.
     // -----------------------------------------------------------------
     native_ram #(
-        .ADDR_W     (14),                               // 16 KiB (see note below)
-        .DATA_WIDTH (64),                               // one access -> two 32-bit words
+        .ADDR_W     (14),                                // 16 KiB (see note below)
+        .DATA_WIDTH (64),                                // one access -> two 32-bit words
         .READ_ONLY  (1),
-        .OUTSTANDING(2),                                // 2 fetch reads in flight
+        .OUTSTANDING(2),                                 // 2 fetch reads in flight
         // A read-only I-mem with no init and no write port is a zero-ROM:
         // Gowin folds every read to constant 0, the fetch stream becomes
         // all-illegal, and the whole pipeline (regfile/csr/alu/execute)
@@ -345,10 +345,10 @@ module top_module (
     // power-up; .bss and the stack are zeroed by start.S / runtime use.
     // -----------------------------------------------------------------
     native_ram #(
-        .ADDR_W     (14),                               // 16 KiB (see note below)
+        .ADDR_W     (14),                                // 16 KiB (see note below)
         .DATA_WIDTH (32),
         .READ_ONLY  (0),
-        .OUTSTANDING(1),                                // LSU single-outstanding
+        .OUTSTANDING(1),                                 // LSU single-outstanding
         .INIT_FILE  ("sim/sw/dhrystone/build/dmem.hex")
     ) u_dmem (
         .clk_i       (clk_core),
@@ -813,7 +813,8 @@ module top_module (
     end
 
     assign led_o[3:1] = led_cnt_q[27:25];
-    assign led_o[0]   = dbg_stall;
+    //assign led_o[0]   = dbg_stall;
+    assign led_o[0]   = gpio_oe[0] ? gpio_out[0] : 1'b0;  // GPIO0 overrides the stall LED
 
 endmodule
 

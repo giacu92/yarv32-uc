@@ -32,6 +32,10 @@ Peripheral base addresses (from `rv32_pkg.sv`):
 | PLIC       | 0x1000_8000 | `plic.h`  |
 | FFT        | 0x1000_A000 | `fft.h`   |
 
+Device drivers sit on top of those: `bmp280.h`, `ds3231.h`, `ssd1306.h`
+(+ `ssd1306_text.h` for a font) and `w25q.h` over I2C/SPI, and
+`mcp3208.h` for the SPI ADC.
+
 ---
 
 ## uart.h
@@ -281,6 +285,51 @@ DONE raises PLIC source 5; `fft_irq_enable()` arms it and
 `fft_irq_clear()` is what completes it (the PLIC's CLAIM read is
 side-effect-free, so a handler that skips it re-takes forever). Worked
 example: `sim/sw/peri/fft`.
+
+## mcp3208.h
+
+MCP3208 (12-bit) / MCP3008 (10-bit) SPI ADC. Same framing for both; set
+`MCP3208_BITS` to 10 before including for the smaller part.
+
+```c
+#include "mcp3208.h"
+
+mcp3208_begin(1000000);              /* 1 MHz SCLK, SPI mode 0 */
+
+unsigned int code = mcp3208_read(0);     /* raw, 0..MCP3208_MAX */
+int          s    = mcp3208_centred(0);  /* signed, -2048..+2047 */
+```
+
+Each read is its own select/transfer/deselect -- the part needs CS to
+rise between conversions. **The part is unipolar**: an audio signal has
+to be biased to Vref/2 outside the chip or the whole negative half is
+lost, and `mcp3208_centred()` only removes the mid-scale code, not the
+residual DC of a real bias network. `mcp3208_read_diff(pair)` does the
+pseudo-differential pairs. Datasheet speed limits are real and fail
+quietly: exceeding them returns codes that have not finished converting,
+so `mcp3208_begin()` makes the SCLK an explicit argument.
+
+## ssd1306_text.h
+
+Text for the OLED. Include it **instead of** `ssd1306.h` -- it pulls the
+driver in, and it is separate only because the font costs ~300 bytes of
+rodata that a graphics-only program should not pay.
+
+```c
+#include "ssd1306_text.h"
+
+ssd1306_text(0, 0, "TUNER", 1);                /* 6x8 cells */
+ssd1306_text_scaled(2, 16, "E2", 2, 1);        /* double height */
+ssd1306_int(60, 0, -12, 4, 1, 1);              /* right-aligned in 4 cells */
+ssd1306_fixed(0, 24, 8241, 2, 1, 1);           /* prints "82.41" */
+unsigned int w = ssd1306_text_width("IN TUNE", 1);   /* for centring */
+```
+
+5x7 glyphs in a 6x8 cell, so 21x8 characters on a 128x64 panel (10x4 at
+scale 2). **ASCII 0x20..0x5A only -- no lowercase**; anything outside the
+range renders as a space rather than as garbage, so a stray byte cannot
+walk off the table. `ssd1306_fixed` is integer-only decimal: there is no
+FPU and no libc here.
 
 ## Device drivers
 

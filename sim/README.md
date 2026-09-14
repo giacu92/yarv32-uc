@@ -471,11 +471,12 @@ quicksort       PASS   337959 cyc
 bp_pred         PASS   425 cyc
 ...
 plic_gpio       PASS   941 cyc
-fft             PASS   1428 cyc
+fft             PASS   3197 cyc
+guitar_tuner    PASS   1763657 cyc
 uart_echo       PASS   29148 cyc, TX ends GOOD
 harvard_oracle  PASS   parks clean
 
-18 passed, 0 failed, 0 skipped
+19 passed, 0 failed, 0 skipped
 ```
 
 Three kinds of check, because the tests really do report differently, and the
@@ -532,6 +533,21 @@ exits non-zero. A test harness that has never failed has not been tested.
   Numeric accuracy is `hw/fft_tb`'s job, not this file's. Result @0x3000;
   the first failing step number, the claim ID and the cycle count stay in
   `.data` for a board post-mortem.
+- **`sw/guitar_tuner/`** — a guitar tuner, and the FFT coprocessor's first
+  real application: MCP3208 SPI ADC → windowed 1024-point transform →
+  fundamental pick → parabolic interpolation → nearest chromatic note and
+  cents → SSD1306 needle gauge. Neither device is modelled here, so the
+  harness builds **twice**: `build/` is the board image, and `build-sim/`
+  (`-DTUNER_SIM=1`) swaps the ADC for a synthetic oscillator and the
+  display for the UART, then checks nine known frequencies — exact notes
+  and deliberate ±10/20/30/35-cent offsets — plus silence. That covers the
+  whole chain except the two peripherals: window, FFT hardware, peak pick,
+  interpolation, note maths. **Worst measured error 3 cents**, printed on
+  every run so a regression shows as the number moving even while the test
+  still passes. The synthetic source makes the *third* harmonic the
+  loudest partial on purpose: a build that picked the largest bin reports
+  B3 for a low E and fails every case (verified by mutation). Result
+  @0x3000.
 - **`sw/isa/ifault/`** — jumps to 0x100000 (outside the 16 KiB I-mem), checks
   one trap with `mcause=1`, `mtval` = jumped-to address. Handler rewrites
   `mepc` (the address is still unfetchable).

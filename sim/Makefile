@@ -83,6 +83,12 @@ run: $(TOP)
 #
 # Three kinds of check, because the tests genuinely differ in how they report:
 #
+# Fields: <name>:<image dir, relative to sw/>:<MAX_CYC>:<check>. The image
+# directory carries the build/ suffix explicitly, because a harness may ship
+# more than one -- guitar_tuner builds a board image in build/ and its
+# self-check in build-sim/, and only the latter can run without the ADC and
+# the OLED that are not modelled here.
+#
 #   probe@<addr>=<hex>  Read a D-mem word back out of the RTL (PROBE, see
 #                       sim_main.cpp) and compare. This is the exact result.
 #                       Do NOT substitute a grep of the retire trace: the `li`
@@ -104,22 +110,23 @@ run: $(TOP)
 # uart_echo is special-cased at the end: it needs UART_RX stimulus, and its
 # pass condition is the "GOOD" its firmware transmits, not a memory word.
 REGRESS_TESTS := \
-	quicksort:quicksort:400000:trace:x10=600d \
-	bp_pred:isa/bp_pred:20000:probe@0x2000=600d \
-	mul_ops:isa/mul_ops:20000:probe@0x2000=600d \
-	div_ops:isa/div_ops:20000:probe@0x2000=600d \
-	rvc_scramble:isa/rvc_scramble:20000:probe@0x2000=600d \
-	span_target:isa/span_target:20000:probe@0x2000=600d \
-	ifault:isa/ifault:20000:probe@0x2000=600d \
-	isa_probe:isa/isa_probe:200000:park \
-	trap:intr/trap:20000:probe@0x2000=600d \
-	wfi_trap:intr/wfi_trap:20000:probe@0x2000=600d \
-	timer:intr/timer:20000:probe@0x2000=600d \
-	plic_gpio:peri/plic_gpio:200000:probe@0x3000=600d \
-	fft:peri/fft:200000:probe@0x3000=600d \
-	i2c_reg:peri/i2c_reg:1000000:probe@0x3000=600d \
-	spi_loop:peri/spi_loop:400000:probe@0x3000=600d \
-	i2c_scan:peri/i2c_scan:5000000:probe@0x3000=600d
+	quicksort:quicksort/build:400000:trace:x10=600d \
+	bp_pred:isa/bp_pred/build:20000:probe@0x2000=600d \
+	mul_ops:isa/mul_ops/build:20000:probe@0x2000=600d \
+	div_ops:isa/div_ops/build:20000:probe@0x2000=600d \
+	rvc_scramble:isa/rvc_scramble/build:20000:probe@0x2000=600d \
+	span_target:isa/span_target/build:20000:probe@0x2000=600d \
+	ifault:isa/ifault/build:20000:probe@0x2000=600d \
+	isa_probe:isa/isa_probe/build:200000:park \
+	trap:intr/trap/build:20000:probe@0x2000=600d \
+	wfi_trap:intr/wfi_trap/build:20000:probe@0x2000=600d \
+	timer:intr/timer/build:20000:probe@0x2000=600d \
+	plic_gpio:peri/plic_gpio/build:200000:probe@0x3000=600d \
+	fft:peri/fft/build:200000:probe@0x3000=600d \
+	guitar_tuner:guitar_tuner/build-sim:3000000:probe@0x3000=600d \
+	i2c_reg:peri/i2c_reg/build:1000000:probe@0x3000=600d \
+	spi_loop:peri/spi_loop/build:400000:probe@0x3000=600d \
+	i2c_scan:peri/i2c_scan/build:5000000:probe@0x3000=600d
 
 # ----------------------------------------------------------------------
 # lint — dead wires, unread bits, unused parameters
@@ -166,8 +173,8 @@ regress: $(TOP)
 	    dir=$$(echo  "$$t" | cut -d: -f2); \
 	    maxc=$$(echo "$$t" | cut -d: -f3); \
 	    check=$$(echo "$$t" | cut -d: -f4-); \
-	    if [ ! -f "sw/$$dir/build/imem.hex" ]; then \
-	        printf '%-15s %-6s %s\n' "$$name" SKIP "no build/ -- run: make -C sw/$$dir"; \
+	    if [ ! -f "sw/$$dir/imem.hex" ]; then \
+	        printf '%-15s %-6s %s\n' "$$name" SKIP "not built -- run: make -C sw/$${dir%/*}"; \
 	        skip=$$((skip+1)); continue; \
 	    fi; \
 	    probe=; want=; reg=; \
@@ -178,7 +185,7 @@ regress: $(TOP)
 	               want=$$(echo "$$check" | sed 's/.*=//');; \
 	    esac; \
 	    out=$$(PROBE=$$probe NO_VCD=1 MAX_CYC=$$maxc RTL_TRACE=.regress.trace ./$(TOP) \
-	           +IINIT=sw/$$dir/build/imem.hex +DINIT=sw/$$dir/build/dmem.hex 2>&1); \
+	           +IINIT=sw/$$dir/imem.hex +DINIT=sw/$$dir/dmem.hex 2>&1); \
 	    cyc=$$(echo "$$out" | sed -n 's/^retired [0-9]* instructions in \([0-9]*\) cycles.*/\1/p'); \
 	    bad=; \
 	    echo "$$out" | grep -q 'WFI-HALT FAIL' && bad="WFI-HALT FAIL"; \

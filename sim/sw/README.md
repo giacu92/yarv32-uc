@@ -21,6 +21,9 @@ sim/sw/
   coremark/         EEMBC CoreMark (eembc/ upstream + local port layer)
   dhrystone/        Dhrystone 2.1 (sifive/ upstream + local port layer)
   yarvmon/          YarvMon serial monitor (board's default product firmware)
+  guitar_tuner/     guitar tuner: SPI ADC -> FFT coprocessor -> SSD1306 gauge
+                    (builds twice: build/ for the board, build-sim/ for the
+                     self-check that needs neither device)
   isa/              ISA oracles: ifault, isa_probe, rvc_scramble,
                     span_target, bp_pred
   intr/             trap + interrupt oracles: trap, timer, wfi_trap

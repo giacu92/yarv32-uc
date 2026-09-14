@@ -111,6 +111,17 @@ IMEM_PAD_WORDS ?= 0
 IMEM_PAD_VALUE ?= 0x00100073
 DMEM_BASE      ?= 0x2000
 
+# --- Size report ---------------------------------------------------------
+# Printed at the end of every build: how much of each physical memory the
+# image occupies. IMEM is the full 16 KiB fetch ROM. The D-mem's usable
+# region for the image starts at DMEM_BASE and runs to the top of the
+# 16 KiB RAM (0x4000), so DMEM "free" is also the room the stack has to
+# grow in. .bss is NOBITS -- it is in the ELF but not in dmem.bin -- so
+# its size is read from the section table and added to the image size.
+IMEM_TOTAL := 16384
+DMEM_TOTAL := $(shell echo $$(( 16384 - $(DMEM_BASE) )))
+SIZE       := $(RISCV_PREFIX)-size
+
 # Object list: C programs link the common start.o first (so _start / .text.init
 # is the first thing linked -> IMEM 0x0); standalone .S programs carry their own
 # _start and link alone.
@@ -145,6 +156,12 @@ $(shell cmp -s $(CFG_STAMP).new $(CFG_STAMP) || cp $(CFG_STAMP).new $(CFG_STAMP)
 
 .PHONY: all clean show
 all: $(IMEM_HEX) $(DMEM_HEX) $(OBJD)
+	@iu=$$(stat -c %s $(IMEM_BIN)); \
+	di=$$(stat -c %s $(DMEM_BIN)); \
+	bss=$$($(SIZE) -A $(ELF) | awk '$$1==".bss"{s+=$$2} END{print s+0}'); \
+	du=$$(( di + bss )); \
+	echo "IMEM  $$iu/$(IMEM_TOTAL) B used, $$(($(IMEM_TOTAL)-iu)) B free ($$(awk -v t=$(IMEM_TOTAL) -v u=$$iu 'BEGIN{printf "%.1f", (t-u)*100/t}')% free)"; \
+	echo "DMEM  $$du/$(DMEM_TOTAL) B used ($$di image + $$bss bss), $$(($(DMEM_TOTAL)-du)) B free ($$(awk -v t=$(DMEM_TOTAL) -v u=$$du 'BEGIN{printf "%.1f", (t-u)*100/t}')% free, shared with stack)"
 
 $(BUILD):
 	mkdir -p $(BUILD)

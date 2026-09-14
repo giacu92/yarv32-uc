@@ -29,6 +29,7 @@ sim/*.log
 
 # C-program build artefacts (sim/sw tree: C -> $readmemh hex, regenerable)
 sim/sw/**/build/
+sim/sw/**/build-sim/
 sim/sw*/**/build/
 sim/cosim/ecall/build/
 

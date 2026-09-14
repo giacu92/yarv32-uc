@@ -10,10 +10,12 @@
 # master. Neither is modelled in the simulator.
 #
 # `make sim` (-DTUNER_SIM=1) swaps the ADC for a synthetic oscillator and
-# the display for the UART, then checks the reported note and cents against
-# a table of known frequencies. It exercises the whole chain except the two
-# peripherals -- window, FFT hardware, peak pick, interpolation, note maths
-# -- and writes 0x600D / 0xBAD to D-mem 0x3000 like the other oracles:
+# the display for the UART. It checks the reported note and cents against a
+# table of known frequencies, that silence reads as silence, and that the
+# CIC decimator rejects an out-of-band tone by at least 18 dB. It exercises
+# the whole chain except the two peripherals -- decimator, window, FFT
+# hardware, peak pick, interpolation, note maths -- and writes
+# 0x600D / 0xBAD to D-mem 0x3000 like the other oracles:
 #
 #   cd sim && make run RUN_ARGS="+IINIT=sw/guitar_tuner/build-sim/imem.hex \
 #                                +DINIT=sw/guitar_tuner/build-sim/dmem.hex"

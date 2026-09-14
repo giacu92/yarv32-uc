@@ -76,10 +76,40 @@
 #define TUNER_CORE_HZ 50000000u
 #define TUNER_LOG2N   10u
 #define TUNER_N       (1u << TUNER_LOG2N)
-#define TUNER_FS_HZ   2000u
 
-/* Cycles between samples, for the mcycle-paced acquisition loop. */
-#define TUNER_SAMPLE_CYCLES (TUNER_CORE_HZ / TUNER_FS_HZ)
+/*
+ * SAMPLE RATES, and why the analysis rate is 2 kHz and not 20.
+ *
+ * The transform's rate is NOT an audio-quality choice, it is a
+ * time-frequency trade: bin spacing is fs/N and frame time is N/fs, so
+ * their product is 1 no matter what. At fs = 2 kHz with N = 1024 the bins
+ * are 1.95 Hz and a frame is 0.512 s. Raise fs to 20 kHz and keep N and
+ * the bins become 19.5 Hz -- 41 cents at the low E, which is not a tuner.
+ * Keeping the bins AND the rate would need N = 16384, i.e. three buffers
+ * of 64 KiB against a device with 103 KiB of BSRAM in total. It does not
+ * fit, and it would not help: a guitar's highest fundamental is ~1.2 kHz
+ * at the top fret, so everything above 2.5 kHz of Nyquist is spent on
+ * harmonics the pitch estimator throws away.
+ *
+ * What a fast rate IS worth is ANTI-ALIASING. A plucked string has strong
+ * partials well past 1 kHz, and at a 2 kHz sample rate every one of them
+ * folds straight into the band the fundamental lives in. So the ADC runs
+ * at TUNER_FS_IN_HZ and a CIC decimator drops it to the analysis rate,
+ * which puts the filter's nulls exactly on the frequencies that fold to
+ * DC and does it with two adders instead of an analog brick wall.
+ *
+ * Keep an analog RC in front regardless: the decimator cannot remove
+ * anything that aliased on the way into the ADC, only what aliases on the
+ * way down to 2 kHz.
+ */
+#define TUNER_FS_IN_HZ 16000u
+#define TUNER_DECIM    8u
+#define TUNER_FS_HZ    (TUNER_FS_IN_HZ / TUNER_DECIM)
+
+/* Cycles between ADC conversions, for the mcycle-paced acquisition loop.
+ * 3125 at 50 MHz; an MCP3208 exchange at 1 MHz SCLK is 24 clocks, about
+ * 1200 cycles, so there is room. */
+#define TUNER_SAMPLE_CYCLES (TUNER_CORE_HZ / TUNER_FS_IN_HZ)
 
 /* Search band. Wide enough for D2 (73.4 Hz) to G#4 (415.3 Hz), the
  * chromatic table below, with a little margin either side. */
@@ -161,6 +191,39 @@ static const tuner_note_t tuner_notes[] = {
 };
 #define TUNER_NOTE_N (sizeof(tuner_notes) / sizeof(tuner_notes[0]))
 
+/*
+ * Decimation factor. Constant on the board; the self-check makes it a
+ * variable so it can run the pitch cases at the analysis rate (where the
+ * decimator is a pass-through and each frame costs an eighth as much) and
+ * the anti-aliasing cases at the real input rate. gcc folds the board
+ * form away entirely.
+ */
+/* The CIC's own gain is R^order, so the output shift is 2*log2(R) and
+ * the two MUST move together -- changing the rate without the shift
+ * scales every sample by 64 and the peak vanishes under the noise floor.
+ * tuner_set_decim() is what makes that impossible to get wrong. */
+#define TUNER_CIC_SHIFT 6u /* order 2, R = 8 */
+
+#if TUNER_SIM
+static unsigned int tuner_decim = TUNER_DECIM;
+static unsigned int tuner_cic_shift = TUNER_CIC_SHIFT;
+
+static void tuner_set_decim(unsigned int r)
+{
+    unsigned int sh = 0u;
+
+    tuner_decim = r;
+    while (r > 1u) {
+        r >>= 1;
+        sh += 2u; /* two integrator/comb stages */
+    }
+    tuner_cic_shift = sh;
+}
+#else
+#define tuner_decim     TUNER_DECIM
+#define tuner_cic_shift TUNER_CIC_SHIFT
+#endif
+
 /* Result of one frame. */
 typedef struct {
     int          valid;  /* a pitch was found at all */
@@ -223,14 +286,28 @@ static const short tuner_sinq[257] = {
 static unsigned int tuner_sim_phase;
 static unsigned int tuner_sim_inc;
 
-/* 2^32 / (fs * 100) = 21474.836 for fs = 2000; the rounding costs 0.013
- * cents, far below what the estimator resolves. */
-#define TUNER_SIM_INC_PER_CHZ 21475u
+/*
+ * Phase increment per INPUT sample: 2^32 / (fs_in * 100) = 2684.3546 for
+ * fs_in = 16 kHz. Split into an integer and a thousandths term rather
+ * than rounded to 2684, which would be 1.3e-4 off and cost 0.22 cents --
+ * visible against a 3-cent budget. The split form is 2.6e-7 off, which is
+ * not. A 64-bit intermediate would be exact and would also pull
+ * __udivdi3, which is not linked.
+ */
+static unsigned int tuner_sim_pure;
 
-static void tuner_sim_set(unsigned int f_cHz)
+static void tuner_sim_set(unsigned int f_cHz, unsigned int decim, int pure)
 {
     tuner_sim_phase = 0u;
-    tuner_sim_inc   = f_cHz * TUNER_SIM_INC_PER_CHZ;
+    tuner_sim_pure  = (unsigned int)pure;
+
+    /* Only the two rates the self-check uses. 2^32/(2000*100) =
+     * 21474.836 and 2^32/(16000*100) = 2684.3546. */
+    if (decim == 1u) {
+        tuner_sim_inc = f_cHz * 21474u + (f_cHz * 836u) / 1000u;
+    } else {
+        tuner_sim_inc = f_cHz * 2684u + (f_cHz * 355u) / 1000u;
+    }
 }
 
 /* sin(phase) in Q15, phase Q32, quarter table with quadrant folding and
@@ -259,9 +336,15 @@ static int tuner_adc_sample(void)
     int s;
 
     /* Fundamental at -12 dBFS, 2nd at -14, 3rd at -10: the third is the
-     * strongest partial, which is exactly the trap. */
-    s = (tuner_sin(tuner_sim_phase) >> 2) + (tuner_sin(tuner_sim_phase * 2u) >> 2) +
-        (tuner_sin(tuner_sim_phase * 3u) >> 1);
+     * strongest partial, which is exactly the trap. The anti-aliasing
+     * cases want one clean tone instead, so that the magnitude ratio they
+     * measure is the filter's and not a harmonic's. */
+    if (tuner_sim_pure) {
+        s = tuner_sin(tuner_sim_phase) >> 1;
+    } else {
+        s = (tuner_sin(tuner_sim_phase) >> 2) + (tuner_sin(tuner_sim_phase * 2u) >> 2) +
+            (tuner_sin(tuner_sim_phase * 3u) >> 1);
+    }
     tuner_sim_phase += tuner_sim_inc;
 
     /* Back down to a 12-bit centred ADC code, which is what the real
@@ -289,28 +372,65 @@ static int tuner_adc_sample(void)
  * and needs no table -- Hann would need 1024 Q15 entries or a cosine this
  * build has no way to compute.
  *
+ * DECIMATION. The ADC runs at TUNER_FS_IN_HZ and a second-order CIC
+ * drops it by TUNER_DECIM to the analysis rate. A CIC of order N and
+ * rate R is N integrators at the fast rate, a downsample, and N combs at
+ * the slow rate -- no multipliers, no coefficients, and its nulls land
+ * exactly on the multiples of the output rate, which is precisely where
+ * everything that aliases to DC comes from. Order 2 buys about 30 dB at
+ * the worst fold against 15 dB for a plain boxcar, for one more adder.
+ *
+ * The integrators are allowed to wrap. That is not sloppiness: a CIC is
+ * correct under two's-complement wrapping as long as the accumulator is
+ * wide enough for the filter's own gain (R^order = 64 here against
+ * 12-bit inputs, so 19 bits -- a 32-bit int has room to spare), because
+ * the comb stage subtracts the wrap back out. The transient at the start
+ * of each frame is two output samples long and lands where the window is
+ * zero anyway.
+ *
  * On the board the sample clock is a busy-wait on mcycle. The display
  * push is deliberately NOT done here: 1 KiB over I2C at 400 kHz is ~25
- * ms, which at fs = 2 kHz would swallow fifty sample slots.
+ * ms, which at the 16 kHz input rate would swallow four hundred sample
+ * slots.
  */
 static void tuner_acquire(void)
 {
-    unsigned int i;
+    unsigned int i, d;
     int          mean;
     int          sum = 0;
+    /* CIC state: two integrators, two comb delays. */
+    int          i1 = 0, i2 = 0, d1 = 0, d2 = 0;
 #if !TUNER_SIM
     unsigned int next = sys_cycle();
 #endif
 
     for (i = 0; i < TUNER_N; i++) {
-        int s;
+        int s, c1, c2;
+
+        for (d = 0; d < tuner_decim; d++) {
 #if !TUNER_SIM
-        /* Signed difference so the comparison survives mcycle wrapping. */
-        while ((int)(sys_cycle() - next) < 0) {
-        }
-        next += TUNER_SAMPLE_CYCLES;
+            /* Signed difference so the comparison survives mcycle wrapping. */
+            while ((int)(sys_cycle() - next) < 0) {
+            }
+            next += TUNER_SAMPLE_CYCLES;
 #endif
-        s = tuner_adc_sample();
+            i1 += tuner_adc_sample();
+            i2 += i1;
+        }
+
+        c1 = i2 - d1;
+        d1 = i2;
+        c2 = c1 - d2;
+        d2 = c1;
+
+        /* Divide out the CIC's gain, R^order, back to the ADC's own
+         * scale. An arithmetic shift, so it rounds toward -inf; the bias
+         * is half an LSB of a 12-bit code and the DC removal below eats
+         * it whole. At R = 1 the shift is 0 and the whole structure
+         * collapses to an identity, which is what lets the pitch cases
+         * bypass it. */
+        s = c2 >> tuner_cic_shift;
+
         sum += s;
         fft_write_real(i, s);
     }
@@ -675,6 +795,75 @@ static const tuner_case_t tuner_cases[] = {
 
 static volatile unsigned int *const tuner_result = (volatile unsigned int *)0x3000;
 
+/* One frame end to end: drive the oscillator, acquire, transform,
+ * analyse. Returns 0 if the engine never finished. */
+static int tuner_run_frame(unsigned int f_cHz, int pure, tuner_result_t *r)
+{
+    tuner_sim_set(f_cHz, tuner_decim, pure);
+    tuner_acquire();
+    fft_start();
+    if (!fft_wait()) {
+        uart_puts("FFT never finished\r\n");
+        return 0;
+    }
+    fft_swap();
+    tuner_analyse(r);
+    return 1;
+}
+
+/*
+ * Anti-aliasing check, and the only part that runs at the full input
+ * rate. Two pure tones of the same amplitude: D4 at 293.66 Hz, which the
+ * decimator must pass, and 1706.34 Hz, which is 2000 - 293.66 and folds
+ * onto exactly the same bin. A second-order CIC at R = 8 puts about 30 dB
+ * between them; the test asks for 18, so it fails a missing or first-order
+ * filter without being sensitive to the exact shape.
+ */
+#define TUNER_ALIAS_IN_CHZ   29366u /* D4 */
+#define TUNER_ALIAS_OUT_CHZ 170634u /* 2000 Hz - D4: folds back onto D4 */
+#define TUNER_ALIAS_REJECT  8u      /* required magnitude ratio */
+
+static unsigned int tuner_check_alias(void)
+{
+    tuner_result_t in, out;
+    unsigned int   fails = 0u;
+
+    tuner_set_decim(TUNER_DECIM);
+
+    if (!tuner_run_frame(TUNER_ALIAS_IN_CHZ, 1, &in)) {
+        return 1u;
+    }
+    uart_puts("in-band   ");
+    tuner_report(&in);
+
+    if (!tuner_run_frame(TUNER_ALIAS_OUT_CHZ, 1, &out)) {
+        return 1u;
+    }
+    uart_puts("aliasing  ");
+    tuner_report(&out);
+
+    /* The in-band tone must survive the decimator and still read as D4. */
+    if (!in.valid) {
+        uart_puts("   ^ decimator killed the passband\r\n");
+        fails++;
+    }
+
+    /* And the out-of-band one must not come back as a pitch. */
+    if (out.peak * TUNER_ALIAS_REJECT > in.peak) {
+        uart_puts("   ^ alias rejection only ");
+        tuner_put_uint(in.peak / (out.peak ? out.peak : 1u));
+        uart_puts("x\r\n");
+        fails++;
+    } else {
+        uart_puts("alias rejection ");
+        tuner_put_uint(in.peak / (out.peak ? out.peak : 1u));
+        uart_puts("x\r\n");
+    }
+
+    tuner_set_decim(1u);
+    return fails;
+}
+
 int main(void)
 {
     tuner_result_t r;
@@ -683,19 +872,19 @@ int main(void)
     uart_puts("\r\nguitar tuner self-check\r\n");
     fft_begin(TUNER_LOG2N);
 
+    /* Pitch cases run with the decimator as a pass-through and the
+     * oscillator at the analysis rate: same estimator, an eighth of the
+     * simulated cycles. The decimator gets its own test below, where the
+     * input rate is what is under test. */
+    tuner_set_decim(1u);
+
     for (i = 0; i < TUNER_CASE_N; i++) {
         int err;
 
-        tuner_sim_set(tuner_cases[i].f_cHz);
-        tuner_acquire();
-        fft_start();
-        if (!fft_wait()) {
-            uart_puts("FFT never finished\r\n");
+        if (!tuner_run_frame(tuner_cases[i].f_cHz, 0, &r)) {
             fails++;
             break;
         }
-        fft_swap();
-        tuner_analyse(&r);
         tuner_report(&r);
 
         if (!r.valid || r.note != tuner_cases[i].note) {
@@ -724,12 +913,7 @@ int main(void)
     /* Silence must read as "no signal", not as a note picked out of the
      * rounding noise: inc = 0 holds the oscillator at zero, so after DC
      * removal the frame is all zeros. */
-    tuner_sim_set(0u);
-    tuner_acquire();
-    fft_start();
-    if (fft_wait()) {
-        fft_swap();
-        tuner_analyse(&r);
+    if (tuner_run_frame(0u, 0, &r)) {
         tuner_report(&r);
         if (r.valid) {
             uart_puts("   ^ silence reported as a pitch\r\n");
@@ -738,6 +922,8 @@ int main(void)
     } else {
         fails++;
     }
+
+    fails += tuner_check_alias();
 
     uart_puts("worst cents error ");
     tuner_put_uint(worst);

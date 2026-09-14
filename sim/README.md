@@ -472,7 +472,7 @@ bp_pred         PASS   425 cyc
 ...
 plic_gpio       PASS   941 cyc
 fft             PASS   3197 cyc
-guitar_tuner    PASS   1763657 cyc
+guitar_tuner    PASS   3016457 cyc
 uart_echo       PASS   29148 cyc, TX ends GOOD
 harvard_oracle  PASS   parks clean
 
@@ -534,20 +534,29 @@ exits non-zero. A test harness that has never failed has not been tested.
   the first failing step number, the claim ID and the cycle count stay in
   `.data` for a board post-mortem.
 - **`sw/guitar_tuner/`** — a guitar tuner, and the FFT coprocessor's first
-  real application: MCP3208 SPI ADC → windowed 1024-point transform →
-  fundamental pick → parabolic interpolation → nearest chromatic note and
-  cents → SSD1306 needle gauge. Neither device is modelled here, so the
-  harness builds **twice**: `build/` is the board image, and `build-sim/`
+  real application: MCP3208 SPI ADC at 16 kHz → 2nd-order CIC decimation
+  by 8 → windowed 1024-point transform at 2 kHz → fundamental pick →
+  parabolic interpolation → nearest chromatic note and cents → SSD1306
+  needle gauge. Neither device is modelled here, so the harness builds
+  **twice**: `build/` is the board image, and `build-sim/`
   (`-DTUNER_SIM=1`) swaps the ADC for a synthetic oscillator and the
-  display for the UART, then checks nine known frequencies — exact notes
-  and deliberate ±10/20/30/35-cent offsets — plus silence. That covers the
-  whole chain except the two peripherals: window, FFT hardware, peak pick,
-  interpolation, note maths. **Worst measured error 3 cents**, printed on
-  every run so a regression shows as the number moving even while the test
-  still passes. The synthetic source makes the *third* harmonic the
-  loudest partial on purpose: a build that picked the largest bin reports
-  B3 for a low E and fails every case (verified by mutation). Result
-  @0x3000.
+  display for the UART. It then checks three things.
+  *Pitch*: nine known frequencies — exact notes and deliberate
+  ±10/20/30/35-cent offsets — plus silence, which must read as silence
+  rather than as a note picked out of the rounding noise. **Worst measured
+  error 3 cents**, printed every run so a regression shows as the number
+  moving even while the test still passes. The synthetic source makes the
+  *third* harmonic the loudest partial on purpose: a build that picked the
+  largest bin reports B3 for a low E and fails every case (verified by
+  mutation).
+  *Anti-aliasing*: two equal pure tones at the real 16 kHz input rate —
+  D4 at 293.66 Hz, and 1706.34 Hz, which folds onto exactly the same bin.
+  Measured rejection **32×**; the gate is 8×, so a first-order filter
+  (measured 5×, and it reports the alias as a confident D4) fails it.
+  These are the only frames run at the full input rate; the pitch cases
+  bypass the decimator, which is what keeps the test at ~3M cycles instead
+  of 10M.
+  Result @0x3000.
 - **`sw/isa/ifault/`** — jumps to 0x100000 (outside the 16 KiB I-mem), checks
   one trap with `mcause=1`, `mtval` = jumped-to address. Handler rewrites
   `mepc` (the address is still unfetchable).

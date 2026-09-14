@@ -134,10 +134,9 @@ module sim_top #(
     // -----------------------------------------------------------------
     // CPU. Functional ports only; debug is observed via the Verilator
     // hierarchy (--public-flat) from sim_main, not through ports here.
-    // The aggregate stall tap (dbg_stall_o) is sunk to an unused wire —
-    // it carries no per-stage debug, just a "pipe stalled" status bit.
+    // The dbg_stall_o tap was removed from the CPU top (uncommitted local
+    // change): the port is gone, so there is nothing to sink here.
     // -----------------------------------------------------------------
-    wire         unused_dbg_stall;
     // IMEM_ADDR_W must match u_imem below: fetch uses it to tell a PC inside
     // the implemented I-mem from one outside it, which is the difference
     // between fetching an instruction and taking an access fault.
@@ -152,7 +151,6 @@ module sim_top #(
         .clk_i      (clk_i),
         .rstn_i     (rstn_i),
         .boot_addr_i(32'h0000_0000),
-        .dbg_stall_o(unused_dbg_stall),
         .axi_peri   (axi_bus_peri.master),
         .imem_req_o (imem_req),
         .imem_rsp_i (imem_rsp),
@@ -382,9 +380,12 @@ module sim_top #(
     assign peri_rresp[4+:2]      = axi_bus_msip.rresp;
     assign peri_rdata[64+:32]    = axi_bus_msip.rdata;
 
-    // Window 3: I2C. Pins are tied off — no I2C slave model, so the lines
-    // read released (high): an enabled transfer sees all-1s and times out
-    // per the engine, which is exactly how an open bus behaves.
+    // Window 3: I2C. A slave-device model (i2c_slave_model, the SV port of
+    // the proven sim/hw/i2c_tb C++ device) sits on the open-drain bus: the
+    // lines are a 2-state wired-AND with pull-up, any driver pulling low
+    // makes the line low, otherwise the pull-up holds it high -- the same
+    // topology i2c_tb models without Verilator tri-state resolution. The
+    // slave never stretches SCL, so its SCL pull is hard 0.
     assign axi_bus_i2c.awaddr    = peri_awaddr;
     assign axi_bus_i2c.wdata     = peri_wdata;
     assign axi_bus_i2c.wstrb     = peri_wstrb;
@@ -403,21 +404,38 @@ module sim_top #(
     assign peri_rresp[6+:2]      = axi_bus_i2c.rresp;
     assign peri_rdata[96+:32]    = axi_bus_i2c.rdata;
 
-    wire unused_i2c_scl_oe, unused_i2c_sda_oe;
+    wire i2c_scl_oe, i2c_sda_oe, i2c_slave_sda_oe;
+    wire i2c_scl_line = (i2c_scl_oe) ? 1'b0 : 1'b1;
+    wire i2c_sda_line = (i2c_sda_oe | i2c_slave_sda_oe) ? 1'b0 : 1'b1;
 
     axi4_lite_i2c u_i2c (
         .clk_i    (clk_i),
         .rstn_i   (rstn_i),
         .axi      (axi_bus_i2c.slave),
-        .scl_i    (1'b1),               // released line (pulled high)
-        .sda_i    (1'b1),
-        .scl_oe_o (unused_i2c_scl_oe),
-        .sda_oe_o (unused_i2c_sda_oe),
+        .scl_i    (i2c_scl_line),
+        .sda_i    (i2c_sda_line),
+        .scl_oe_o (i2c_scl_oe),
+        .sda_oe_o (i2c_sda_oe),
         .i2c_irq_o(i2c_irq)
     );
 
-    // Window 4: SPI. MISO tied low (no slave model); the pin outputs sink
-    // to unused wires.
+    // The device on the bus: address 0x50, 16 byte registers (reset
+    // contents 0x10+i), auto-incrementing pointer. Everything the sw/peri
+    // I2C oracles talk to.
+    i2c_slave_model #(
+        .ADDR7(7'h50)
+    ) u_i2c_slave (
+        .clk_i   (clk_i),
+        .rstn_i  (rstn_i),
+        .scl_i   (i2c_scl_line),
+        .sda_i   (i2c_sda_line),
+        .sda_oe_o(i2c_slave_sda_oe)
+    );
+
+    // Window 4: SPI. Full-duplex loopback (MISO = MOSI): protocol-agnostic
+    // across all 4 CPOL/CPHA modes, and enough to exercise the whole data
+    // path -- TX FIFO -> shifter -> pin -> RX capture -> RX FIFO -> read --
+    // since every received byte is exactly the byte sent.
     assign axi_bus_spi.awaddr  = peri_awaddr;
     assign axi_bus_spi.wdata   = peri_wdata;
     assign axi_bus_spi.wstrb   = peri_wstrb;
@@ -436,16 +454,16 @@ module sim_top #(
     assign peri_rresp[8+:2]    = axi_bus_spi.rresp;
     assign peri_rdata[128+:32] = axi_bus_spi.rdata;
 
-    wire unused_spi_sck, unused_spi_mosi, unused_spi_cs_n;
+    wire spi_sck, spi_mosi, spi_cs_n;
 
     axi4_lite_spi u_spi (
         .clk_i     (clk_i),
         .rstn_i    (rstn_i),
         .axi       (axi_bus_spi.slave),
-        .spi_sck_o (unused_spi_sck),
-        .spi_mosi_o(unused_spi_mosi),
-        .spi_miso_i(1'b0),
-        .spi_cs_n_o(unused_spi_cs_n),
+        .spi_sck_o (spi_sck),
+        .spi_mosi_o(spi_mosi),
+        .spi_miso_i(spi_mosi),           // loopback
+        .spi_cs_n_o(spi_cs_n),
         .spi_irq_o (spi_irq)
     );
 

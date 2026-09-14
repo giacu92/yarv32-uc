@@ -526,10 +526,11 @@ int main(int argc, char** argv) {
         top->eval();
         vdump(tfp, sim_time++);
 
-        // Aggregate pipe-stall status for this cycle (dbg_stall_o =
-        // dec_stall | ex_stall, sunk to unused_dbg_stall in sim_top).
+        // Aggregate pipe-stall status for this cycle (the old dbg_stall_o
+        // tap, = dec_stall | ex_stall; the CPU port was removed, so the
+        // nets are tapped through the hierarchy instead).
         // Sampled post-edge; counts RAW-hazard / DIV / LSU stalls.
-        if (STAP(unused_dbg_stall)) ++stalled;
+        if (TAP(dec_stall) || TAP(ex_stall)) ++stalled;
 
         // ---- WFI-halt liveness (see the declarations above) ----
         {

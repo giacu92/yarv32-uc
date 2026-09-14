@@ -1,9 +1,9 @@
 # Peripheral / integration oracles. Builds every test in this group with one command.
 #
-#   make            build uart_echo
+#   make            build every test in the group
 #   make clean      clean all
 
-TESTS := uart_echo plic_gpio
+TESTS := uart_echo plic_gpio i2c_reg spi_loop i2c_scan
 
 .PHONY: all clean $(TESTS)
 all:

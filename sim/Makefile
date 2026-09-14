@@ -34,6 +34,7 @@ RTL := \
 	../src/rtl/utils/axi4_lite_spi.sv \
 	../src/rtl/utils/axi4_lite_gpio.sv \
 	../src/rtl/utils/axi4_lite_plic.sv \
+	i2c_slave_model.sv \
 	sim_top.sv
 
 # Harvard topology: native u_imem (read-only) + u_dmem (byte-strobed) on
@@ -111,7 +112,10 @@ REGRESS_TESTS := \
 	trap:intr/trap:20000:probe@0x2000=600d \
 	wfi_trap:intr/wfi_trap:20000:probe@0x2000=600d \
 	timer:intr/timer:20000:probe@0x2000=600d \
-	plic_gpio:peri/plic_gpio:200000:probe@0x3000=600d
+	plic_gpio:peri/plic_gpio:200000:probe@0x3000=600d \
+	i2c_reg:peri/i2c_reg:1000000:probe@0x3000=600d \
+	spi_loop:peri/spi_loop:400000:probe@0x3000=600d \
+	i2c_scan:peri/i2c_scan:5000000:probe@0x3000=600d
 
 # ----------------------------------------------------------------------
 # lint — dead wires, unread bits, unused parameters

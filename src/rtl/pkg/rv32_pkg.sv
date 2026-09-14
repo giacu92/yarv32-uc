@@ -168,7 +168,7 @@ package rv32_pkg;
     // Peripheral address map. These are the single source of truth for
     // the peri xbar windows: the board top and the sim top pass them to
     // the parametric peri xbar (axi4_lite_xbar; both tops instantiate
-    // N=7) rather than
+    // N=8) rather than
     // repeating literals, so the map cannot drift between the two.
     //
     //   0x1000_0000 .. 0x1000_0FFF  UART   (axi4_lite_uart)
@@ -178,15 +178,19 @@ package rv32_pkg;
     //   0x1000_6000 .. 0x1000_6FFF  SPI    (axi4_lite_spi)
     //   0x1000_7000 .. 0x1000_7FFF  GPIO   (axi4_lite_gpio)
     //   0x1000_8000 .. 0x1000_8FFF  PLIC   (axi4_lite_plic)
+    //   0x1000_A000 .. 0x1000_BFFF  FFT    (axi4_lite_fft, 8 KiB)
     //
     // MSIP_PERI_ADDR: a write of bit[0] sets/clears mip.MSIP.
     // I2C/SPI: board and sim both instantiate them (sim ties the pins off).
     // GPIO: 4 pins; sim loops the pins back onto themselves (pull-up model).
     // PLIC: aggregates the peripheral level IRQs (UART/I2C/SPI/GPIO) into
     // meip; MSIP/MTIP stay direct (CLINT-style, outside the PLIC).
+    // FFT: 8 KiB coprocessor window (CSR page + DATA page), see
+    // axi4_lite_fft.sv; its DONE interrupt is PLIC source 5.
     // 0x1000_4000..0x1000_4FFF is deliberately unmapped: it held an SDIO
-    // controller that was dropped from this branch. An access there gets a
-    // DECERR from the peri xbar.
+    // controller that was dropped from this branch. 0x1000_9000..0x1000_9FFF
+    // is unmapped too, so the FFT's 8 KiB window stays 8 KiB aligned. An
+    // access to either gets a DECERR from the peri xbar.
     // ---------------------------------------------------------------
     localparam logic [XLEN-1:0] UART_BASE = 32'h1000_0000;
     localparam logic [XLEN-1:0] UART_SIZE = 32'h0000_1000;
@@ -202,6 +206,13 @@ package rv32_pkg;
     localparam logic [XLEN-1:0] GPIO_SIZE = 32'h0000_1000;
     localparam logic [XLEN-1:0] PLIC_BASE = 32'h1000_8000;
     localparam logic [XLEN-1:0] PLIC_SIZE = 32'h0000_1000;
+    // FFT coprocessor: 8 KiB, the only window in the map that is not 4 KiB.
+    // It needs two 4 KiB pages -- CSR at +0x0000, the DATA view of the
+    // CPU-owned sample buffer at +0x1000 (1024 complex words) -- and the
+    // peripheral decodes the two on addr[12], so the base MUST stay 8 KiB
+    // aligned. 0x1000_9000 is left unmapped to keep that alignment.
+    localparam logic [XLEN-1:0] FFT_BASE = 32'h1000_A000;
+    localparam logic [XLEN-1:0] FFT_SIZE = 32'h0000_2000;
 
     // ---------------------------------------------------------------
     // PLIC source IDs (bit positions in the PLIC's pending/enable
@@ -215,15 +226,16 @@ package rv32_pkg;
     localparam int unsigned PLIC_SRC_I2C = 2;
     localparam int unsigned PLIC_SRC_SPI = 3;
     localparam int unsigned PLIC_SRC_GPIO = 4;
+    localparam int unsigned PLIC_SRC_FFT = 5;
 
     // ---------------------------------------------------------------
     // Bus address decode. The LSU steers its own accesses on
     // addr[PERI_ADDR_BIT]: =1 goes out the CPU's peri AXI4-Lite master
-    // (UART / CLINT / MSIP / I2C / SPI / GPIO / PLIC), =0 goes to the
+    // (UART / CLINT / MSIP / I2C / SPI / GPIO / PLIC / FFT), =0 goes to the
     // native D-mem.
     // Fetch has its own dedicated native I-mem port (Harvard), so no
     // crossbar splits memory from peripherals; the only xbar is the
-    // parametric 1->7 peri mux at the board top. Default bit 28 (0x1000_0000+ is
+    // parametric 1->8 peri mux at the board top. Default bit 28 (0x1000_0000+ is
     // peripheral), a conventional MMIO base.
     // Moveable here so the map lives in one place, not hardcoded in the
     // LSU or the board top.

@@ -17,6 +17,7 @@ seven MMIO slaves behind the parametric 1→N xbar (`axi4_lite_xbar`, windows fr
 | `axi4_lite_spi` | `0x1000_6000` | SPI master (pins tied off in sim) |
 | `axi4_lite_gpio` | `0x1000_7000` | 4 pins, looped back onto themselves (pull-up model) |
 | `axi4_lite_plic` | `0x1000_8000` | cause/claim MEIP over the peripheral IRQs |
+| `axi4_lite_fft` | `0x1000_A000` | FFT coprocessor, 8 KiB (CSR page + sample DATA page), DONE IRQ → PLIC src 5 |
 
 `sim_top.sv` replicates the board top's wiring so memories can be preloaded
 and CPU per-stage taps logged. The UART is driven both ways: `uart_rxd_i` is a
@@ -146,6 +147,14 @@ Independent harnesses (no CPU) that drive a single slave from a C++ BFM.
 - **`hw/plic_tb/`** — PLIC cause/claim contract: pending tracks the lines,
   enable masking, lowest-ID priority, the claim-without-service livelock
   shape, source-0 exclusion → 59 checks.
+- **`hw/fft_tb/`** — FFT coprocessor: register contract, CONF clamping,
+  ping-pong ownership, DONE/IRQ, write-protection while BUSY, and every
+  transform checked **twice** — bit-exact against a model of the datapath
+  (same Q15 table, same rounding points, same saturation) *and* against a
+  double-precision O(N²) DFT with a tolerance. The pairing is the point: a
+  model alone proves only that the RTL matches the model, so the
+  independent DFT is what catches a shared misunderstanding. Worst
+  measured deviation from the double reference is 1.8 LSB → 9316 checks.
 
 ```
 cd hw/uart_tb         && make run   # 146 checks, 0 failures
@@ -156,6 +165,7 @@ cd hw/i2c_tb          && make run
 cd hw/spi_tb          && make run
 cd hw/gpio_tb         && make run
 cd hw/plic_tb         && make run
+cd hw/fft_tb          && make run   # 9316 checks, 0 failures
 ```
 
 ## Co-sim vs Spike (`cosim/`)
@@ -460,11 +470,12 @@ TEST            RESULT DETAIL
 quicksort       PASS   337959 cyc
 bp_pred         PASS   425 cyc
 ...
-plic_gpio       PASS   956 cyc
-uart_echo       PASS   29147 cyc, TX ends GOOD
+plic_gpio       PASS   941 cyc
+fft             PASS   1428 cyc
+uart_echo       PASS   29148 cyc, TX ends GOOD
 harvard_oracle  PASS   parks clean
 
-14 passed, 0 failed, 0 skipped
+18 passed, 0 failed, 0 skipped
 ```
 
 Three kinds of check, because the tests really do report differently, and the
@@ -506,6 +517,21 @@ exits non-zero. A test harness that has never failed has not been tested.
   firmware must retype the pin to an edge first, then W1C, before arming.
   Result @0x3000; debug fields (claim ID, IRQ count, bad mcause) in `.data`
   for board post-mortem.
+- **`sw/peri/fft/`** — FFT coprocessor end-to-end oracle, written against
+  `common/fft.h` + `common/plic.h`, so the libraries are part of what it
+  tests. Covers what `hw/fft_tb` cannot: that the peripheral is reachable through the real
+  LSU + bridge + crossbar path, that its **8 KiB two-page window** decodes
+  (CSR at +0x0000, sample DATA at +0x1000 — the only window in the map
+  wider than 4 KiB), and that DONE reaches `mip.MEIP` through the PLIC as
+  source 5, woken from `wfi`. The two transforms it runs are the ones
+  whose fixed-point answers are *exact*, so the oracle needs no reference
+  data: an impulse (`x[0]=0x4000`, N=8 → every bin exactly `0x0800`,
+  because each stage halves a power of two) and DC (N=16 → bin 0 only).
+  Streaming is exercised as intended: frame B is written into the
+  CPU-visible buffer **while** the engine is still transforming frame A.
+  Numeric accuracy is `hw/fft_tb`'s job, not this file's. Result @0x3000;
+  the first failing step number, the claim ID and the cycle count stay in
+  `.data` for a board post-mortem.
 - **`sw/isa/ifault/`** — jumps to 0x100000 (outside the 16 KiB I-mem), checks
   one trap with `mcause=1`, `mtval` = jumped-to address. Handler rewrites
   `mepc` (the address is still unfetchable).
@@ -573,7 +599,7 @@ filled" from "the poll never returned" when a board goes quiet mid-line.
   stop, UART RX frame driver).
 - `imem.hex`/`dmem.hex` — Harvard oracle preload.
 - `Makefile` — build/run rules (`RUN_ARGS` forwards plusargs).
-- `hw/{native_mem_tb,native_ram64_tb,ram_tb,uart_tb,i2c_tb,spi_tb,gpio_tb,plic_tb}/` — compliance tests.
+- `hw/{native_mem_tb,native_ram64_tb,ram_tb,uart_tb,i2c_tb,spi_tb,gpio_tb,plic_tb,fft_tb}/` — compliance tests.
 - `cosim/` — shared co-sim assets (`cosim_diff.py`, `build_spike.sh`) +
   `quicksort/`, `coremark/`, `ecall/` harnesses.
 - `sw/` — C → image flow (see `sw/README.md`) and the oracles above.

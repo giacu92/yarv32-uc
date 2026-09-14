@@ -30,6 +30,7 @@ Peripheral base addresses (from `rv32_pkg.sv`):
 | SPI        | 0x1000_6000 | `spi.h`   |
 | GPIO       | 0x1000_7000 | `gpio.h`  |
 | PLIC       | 0x1000_8000 | `plic.h`  |
+| FFT        | 0x1000_A000 | `fft.h`   |
 
 ---
 
@@ -206,7 +207,7 @@ The external-interrupt cause/claim layer over the PLIC. Needs `sys.h`
 #include "plic.h"
 
 /* Source IDs: PLIC_SRC_UART=1, PLIC_SRC_I2C=2, PLIC_SRC_SPI=3,
- * PLIC_SRC_GPIO=4 (rv32_pkg.sv). */
+ * PLIC_SRC_GPIO=4, PLIC_SRC_FFT=5 (rv32_pkg.sv). */
 plic_attach(PLIC_SRC_UART, uart_rx_isr);
 sys_irq_global_enable();        /* after attaching */
 
@@ -221,6 +222,65 @@ unsigned int src = plic_claim();
 entry, calls your handler, and lets anything still pending re-take after
 `mret`. `plic_detach(src)` removes the handler. MSIP/MTIP do not pass
 through the PLIC — they are CLINT-direct.
+
+## fft.h
+
+The FFT coprocessor: radix-2 decimation-in-frequency, signed Q15 complex,
+4 to 1024 points, one butterfly per cycle. Samples live in the
+peripheral's own BSRAM, not in D-mem.
+
+One-shot, ping-pong hidden:
+
+```c
+#include "fft.h"
+
+short win[256], re[256], im[256];
+
+fft_begin(8);                       /* 256 points, 1/N scaling, forward */
+fft_transform_real(win, re, im);    /* fill, start, wait, swap, read */
+
+unsigned int k = fft_peak_bin(1, 128);          /* skip DC, skip the mirror */
+unsigned int hz = fft_bin_hz(k, 48000, 256);    /* bin -> Hz */
+```
+
+**Streaming, and the order is not negotiable.** There are two sample
+buffers and you only ever see one. `fft_start()` hands the buffer you
+filled to the engine *and* hands you back the one holding the PREVIOUS
+result, so the loop body is **wait, start, read, fill** — reading after
+filling loses the result, filling before starting overwrites it:
+
+```c
+fft_begin(8);
+fft_fill_real(frame_a, 256);
+fft_start();                    /* prime: engine has A */
+fft_fill_real(frame_b, 256);    /* fill B while A transforms */
+
+for (;;) {
+    fft_wait();                 /* the frame in flight is done */
+    fft_start();                /* launch the one just filled */
+    fft_read_all(re, im, 256);  /* ... and read the previous result */
+    fft_fill_real(next, 256);   /* into the buffer just freed */
+}
+```
+
+`fft_swap()` drains the last frame without launching another transform.
+
+Numbers: Q15 throughout (-1.0 = -32768, +1.0-2^-15 = 32767). `SCALE`
+divides by 2 after each stage; the all-ones default is 1/N overall and
+cannot overflow, and every write saturates rather than wrapping. A real
+cosine of amplitude A at bin k comes back as A/2 at k and A/2 at N-k.
+Output order is natural — no bit-reversal to undo. `fft_power()` is exact
+(re²+im²); `fft_mag()` is the sqrt-free max+3·min/8 approximation, within
+6.8%, good for peak picking and not for calibrated measurement.
+
+Cost: `(LOG2N + odd) × (N/2 + 4)` cycles — about 21 µs for 256 points and
+103 µs for 1024 at 50 MHz. For large N the MMIO **fill** costs more than
+the transform, so budget that first.
+
+DONE raises PLIC source 5; `fft_irq_enable()` arms it and
+`fft_irq_clear()` is what completes it (the PLIC's CLAIM read is
+side-effect-free, so a handler that skips it re-takes forever). Worked
+example: `sim/sw/peri/fft`.
 
 ## Device drivers
 
@@ -326,8 +386,10 @@ spi_begin_hz(1000000, 0);
 /* one.c — the ONLY file including sys.h / plic.h */
 #include "plic.h"
 
-static void gpio_isr(void)
+/* plic_attach handlers take the source ID the dispatcher claimed. */
+static void gpio_isr(unsigned int src)
 {
+    (void)src;
     if (gpio_int_status() & 0x1)
         gpio_int_clear(0x1);      /* service = drop the line */
 }
@@ -339,6 +401,38 @@ int main(void)
     sys_irq_global_enable();      /* mstatus.MIE; PLIC ENABLE is all-ones
                                      out of reset, meip flows already */
     for (;;)
+        sys_wfi();
+}
+```
+
+**FFT under interrupt:**
+
+```c
+/* one.c — the ONLY file including sys.h / plic.h */
+#include "fft.h"
+#include "plic.h"
+
+static volatile int ready;
+
+static void fft_isr(unsigned int src)
+{
+    (void)src;
+    fft_irq_clear();              /* service = drop the line */
+    ready = 1;
+}
+
+int main(void)
+{
+    fft_begin(8);
+    sys_isr_install();
+    plic_attach(PLIC_SRC_FFT, fft_isr);
+    sys_irq_source_enable(SYS_MIE_MEIE);
+    sys_irq_global_enable();
+    fft_irq_enable();
+
+    fft_fill_real(frame, 256);
+    fft_start();
+    while (!ready)
         sys_wfi();
 }
 ```

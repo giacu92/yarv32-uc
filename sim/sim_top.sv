@@ -15,6 +15,7 @@ import rv32_pkg::*;
  *                    |-> u_spi   (0x1000_6000)
  *                    |-> u_gpio  (0x1000_7000)
  *                    |-> u_plic  (0x1000_8000)
+ *                    |-> u_fft   (0x1000_A000, 8 KiB)
  * Fetch and the LSU each have a dedicated BSRAM (Harvard). The peri bus
  * carries the MSIP + CLINT timer MMIO slaves behind the peri xbar.
  *
@@ -86,6 +87,7 @@ module sim_top #(
     axi4_lite_if axi_bus_spi ();
     axi4_lite_if axi_bus_gpio ();
     axi4_lite_if axi_bus_plic ();
+    axi4_lite_if axi_bus_fft ();
 
     assign axi_bus_peri.aclk     = clk_i;
     assign axi_bus_peri.aresetn  = rstn_i;
@@ -103,6 +105,8 @@ module sim_top #(
     assign axi_bus_gpio.aresetn  = rstn_i;
     assign axi_bus_plic.aclk     = clk_i;
     assign axi_bus_plic.aresetn  = rstn_i;
+    assign axi_bus_fft.aclk      = clk_i;
+    assign axi_bus_fft.aresetn   = rstn_i;
 
     // -----------------------------------------------------------------
     // Native memory ports. Fetch and the LSU each get a dedicated
@@ -129,6 +133,7 @@ module sim_top #(
     wire         i2c_irq;
     wire         spi_irq;
     wire         gpio_irq;
+    wire         fft_irq;
     wire         meip;
 
     // -----------------------------------------------------------------
@@ -275,8 +280,9 @@ module sim_top #(
     //   window 4 -> axi_bus_spi   (SPI_BASE       0x1000_6000)
     //   window 5 -> axi_bus_gpio  (GPIO_BASE      0x1000_7000)
     //   window 6 -> axi_bus_plic  (PLIC_BASE      0x1000_8000)
+    //   window 7 -> axi_bus_fft   (FFT_BASE       0x1000_A000, 8 KiB)
     // -----------------------------------------------------------------
-    localparam int unsigned PERI_N = 7;
+    localparam int unsigned PERI_N = 8;
 
     logic [         31:0] peri_awaddr;
     logic [         31:0] peri_wdata;
@@ -297,9 +303,27 @@ module sim_top #(
     logic [32*PERI_N-1:0] peri_rdata;
 
     axi4_lite_xbar #(
-        .N    (PERI_N),
-        .BASES({PLIC_BASE, GPIO_BASE, SPI_BASE, I2C_BASE, MSIP_PERI_ADDR, MTIMER_BASE, UART_BASE}),
-        .SIZES({PLIC_SIZE, GPIO_SIZE, SPI_SIZE, I2C_SIZE, MSIP_PERI_SIZE, MTIMER_SIZE, UART_SIZE})
+        .N(PERI_N),
+        .BASES({
+            FFT_BASE,
+            PLIC_BASE,
+            GPIO_BASE,
+            SPI_BASE,
+            I2C_BASE,
+            MSIP_PERI_ADDR,
+            MTIMER_BASE,
+            UART_BASE
+        }),
+        .SIZES({
+            FFT_SIZE,
+            PLIC_SIZE,
+            GPIO_SIZE,
+            SPI_SIZE,
+            I2C_SIZE,
+            MSIP_PERI_SIZE,
+            MTIMER_SIZE,
+            UART_SIZE
+        })
     ) u_peri_xbar (
         .clk_i      (clk_i),
         .rstn_i     (rstn_i),
@@ -541,6 +565,25 @@ module sim_top #(
     assign peri_rresp[12+:2]    = axi_bus_plic.rresp;
     assign peri_rdata[192+:32]  = axi_bus_plic.rdata;
 
+    // Window 7: FFT coprocessor (8 KiB window: CSR page + DATA page).
+    assign axi_bus_fft.awaddr   = peri_awaddr;
+    assign axi_bus_fft.wdata    = peri_wdata;
+    assign axi_bus_fft.wstrb    = peri_wstrb;
+    assign axi_bus_fft.araddr   = peri_araddr;
+    assign axi_bus_fft.awvalid  = peri_awvalid[7];
+    assign axi_bus_fft.wvalid   = peri_wvalid[7];
+    assign axi_bus_fft.bready   = peri_bready[7];
+    assign axi_bus_fft.arvalid  = peri_arvalid[7];
+    assign axi_bus_fft.rready   = peri_rready[7];
+    assign peri_awready[7]      = axi_bus_fft.awready;
+    assign peri_wready[7]       = axi_bus_fft.wready;
+    assign peri_bvalid[7]       = axi_bus_fft.bvalid;
+    assign peri_arready[7]      = axi_bus_fft.arready;
+    assign peri_rvalid[7]       = axi_bus_fft.rvalid;
+    assign peri_bresp[14+:2]    = axi_bus_fft.bresp;
+    assign peri_rresp[14+:2]    = axi_bus_fft.rresp;
+    assign peri_rdata[224+:32]  = axi_bus_fft.rdata;
+
     // Source IDs (rv32_pkg::PLIC_SRC_*), assigned by NAME like in the
     // board top so the two cannot drift: 0=none, 1=UART, 2=I2C, 3=SPI,
     // 4=GPIO, 5-15 reserved (tied off). MSIP/MTIP do NOT pass through
@@ -552,7 +595,20 @@ module sim_top #(
         plic_irq[PLIC_SRC_I2C]  = i2c_irq;
         plic_irq[PLIC_SRC_SPI]  = spi_irq;
         plic_irq[PLIC_SRC_GPIO] = gpio_irq;
+        plic_irq[PLIC_SRC_FFT]  = fft_irq;
     end
+
+    // FFT coprocessor. Pin-less: its sample buffers are private BSRAM, so
+    // the only thing leaving the block is the DONE interrupt into the PLIC.
+    axi4_lite_fft #(
+        .NMAX    (1024),
+        .LOG2NMAX(10)
+    ) u_fft (
+        .clk_i    (clk_i),
+        .rstn_i   (rstn_i),
+        .axi      (axi_bus_fft.slave),
+        .fft_irq_o(fft_irq)
+    );
 
     axi4_lite_plic u_plic (
         .clk_i (clk_i),

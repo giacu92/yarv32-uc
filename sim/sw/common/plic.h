@@ -21,7 +21,8 @@
  *                         UART RX FIFO).
  *
  * Source IDs (rv32_pkg::PLIC_SRC_*): 0 reserved ("nothing pending", CLAIM
- * returning 0), 1 UART, 2 I2C, 3 SPI, 4 GPIO, 5-15 reserved (tied off).
+ * returning 0), 1 UART, 2 I2C, 3 SPI, 4 GPIO, 5 FFT, 6-15 reserved (tied
+ * off).
  * Fixed hardware priority LOWER ID WINS; no per-source priority registers.
  *
  * THE LIVELOCK CONTRACT (pinned by sim/hw/plic_tb): a source whose line is
@@ -53,6 +54,7 @@
 #define PLIC_SRC_I2C  2u
 #define PLIC_SRC_SPI  3u
 #define PLIC_SRC_GPIO 4u
+#define PLIC_SRC_FFT  5u
 #define PLIC_SRC_N    16u
 
 /* ------------------------------------------------------------------ */

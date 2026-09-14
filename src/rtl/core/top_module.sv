@@ -26,6 +26,7 @@ import rv32_pkg::*;
  *                            0x1000_6000..6FFF ----------+--> u_spi   (SPI)
  *                            0x1000_7000..7FFF ----------+--> u_gpio  (GPIO)
  *                            0x1000_8000..8FFF ----------+--> u_plic  (PLIC)
+ *                            0x1000_A000..BFFF ----------+--> u_fft   (FFT)
  *
  *   Fetch and the LSU no longer contend: each has a dedicated native
  *   BSRAM port. AXI survives only for peripherals (the peri bridge is
@@ -197,6 +198,7 @@ module top_module (
     //   axi_bus_spi   : xbar m4 -> SPI   slave (SPI_BASE       0x1000_6000).
     //   axi_bus_gpio  : xbar m5 -> GPIO   slave (GPIO_BASE       0x1000_7000).
     //   axi_bus_plic  : xbar m6 -> PLIC   slave (PLIC_BASE       0x1000_8000).
+    //   axi_bus_fft   : xbar m7 -> FFT    slave (FFT_BASE        0x1000_A000, 8 KiB).
     // -----------------------------------------------------------------
     axi4_lite_if axi_bus_peri ();
     axi4_lite_if axi_bus_msip ();
@@ -206,6 +208,7 @@ module top_module (
     axi4_lite_if axi_bus_spi ();
     axi4_lite_if axi_bus_gpio ();
     axi4_lite_if axi_bus_plic ();
+    axi4_lite_if axi_bus_fft ();
 
     // Single clock domain: the whole fabric (CPU bridge, memories, the
     // buses) runs on clk_core / rstn_core. There is NO clock-domain
@@ -227,6 +230,8 @@ module top_module (
     assign axi_bus_gpio.aresetn  = rstn_core;
     assign axi_bus_plic.aclk     = clk_core;
     assign axi_bus_plic.aresetn  = rstn_core;
+    assign axi_bus_fft.aclk      = clk_core;
+    assign axi_bus_fft.aresetn   = rstn_core;
 
     // Debug tap: decode or execute stage stall.
     //wire         dbg_stall;
@@ -262,6 +267,7 @@ module top_module (
     wire         i2c_irq;
     wire         spi_irq;
     wire         gpio_irq;
+    wire         fft_irq;
     wire         meip;
 
     // -----------------------------------------------------------------
@@ -384,23 +390,26 @@ module top_module (
     //   window 4 -> axi_bus_spi   (SPI_BASE       0x1000_6000, 4 KiB)
     //   window 5 -> axi_bus_gpio  (GPIO_BASE       0x1000_7000, 4 KiB)
     //   window 6 -> axi_bus_plic  (PLIC_BASE       0x1000_8000, 4 KiB)
+    //   window 7 -> axi_bus_fft   (FFT_BASE        0x1000_A000, 8 KiB)
     // 0x1000_4000 is unmapped (it held the SDIO controller until it was
-    // dropped from this branch); an access there gets a DECERR.
+    // dropped from this branch), and 0x1000_9000 is unmapped to keep the
+    // FFT's 8 KiB window 8 KiB aligned; an access to either gets a DECERR.
     // -----------------------------------------------------------------
-    localparam int unsigned PERI_N  = 7;
+    localparam int unsigned PERI_N = 8;
 
     // Window indices: the one constant each glue block below indexes off
     // (awvalid[W_x], bresp[2*W_x+:2], rdata[32*W_x+:32]), so a renumbered
     // or new window cannot leave a hand-derived literal behind in one
     // block and not the others -- a missed edit there routes one slave's
     // response into another window with no elaboration error.
-    localparam int unsigned W_UART  = 0;
+    localparam int unsigned W_UART = 0;
     localparam int unsigned W_TIMER = 1;
-    localparam int unsigned W_MSIP  = 2;
-    localparam int unsigned W_I2C   = 3;
-    localparam int unsigned W_SPI   = 4;
-    localparam int unsigned W_GPIO  = 5;
-    localparam int unsigned W_PLIC  = 6;
+    localparam int unsigned W_MSIP = 2;
+    localparam int unsigned W_I2C = 3;
+    localparam int unsigned W_SPI = 4;
+    localparam int unsigned W_GPIO = 5;
+    localparam int unsigned W_PLIC = 6;
+    localparam int unsigned W_FFT = 7;
 
     logic [         31:0] peri_awaddr;
     logic [         31:0] peri_wdata;
@@ -423,6 +432,7 @@ module top_module (
     axi4_lite_xbar #(
         .N(PERI_N),
         .BASES({
+            rv32_pkg::FFT_BASE,
             rv32_pkg::PLIC_BASE,
             rv32_pkg::GPIO_BASE,
             rv32_pkg::SPI_BASE,
@@ -432,6 +442,7 @@ module top_module (
             rv32_pkg::UART_BASE
         }),
         .SIZES({
+            rv32_pkg::FFT_SIZE,
             rv32_pkg::PLIC_SIZE,
             rv32_pkg::GPIO_SIZE,
             rv32_pkg::SPI_SIZE,
@@ -596,6 +607,26 @@ module top_module (
     assign peri_rresp[2*W_PLIC+:2]    = axi_bus_plic.rresp;
     assign peri_rdata[32*W_PLIC+:32]  = axi_bus_plic.rdata;
 
+    // Window 7: FFT coprocessor (8 KiB -- twice every other window, see
+    // rv32_pkg::FFT_SIZE).
+    assign axi_bus_fft.awaddr         = peri_awaddr;
+    assign axi_bus_fft.wdata          = peri_wdata;
+    assign axi_bus_fft.wstrb          = peri_wstrb;
+    assign axi_bus_fft.araddr         = peri_araddr;
+    assign axi_bus_fft.awvalid        = peri_awvalid[W_FFT];
+    assign axi_bus_fft.wvalid         = peri_wvalid[W_FFT];
+    assign axi_bus_fft.bready         = peri_bready[W_FFT];
+    assign axi_bus_fft.arvalid        = peri_arvalid[W_FFT];
+    assign axi_bus_fft.rready         = peri_rready[W_FFT];
+    assign peri_awready[W_FFT]        = axi_bus_fft.awready;
+    assign peri_wready[W_FFT]         = axi_bus_fft.wready;
+    assign peri_bvalid[W_FFT]         = axi_bus_fft.bvalid;
+    assign peri_arready[W_FFT]        = axi_bus_fft.arready;
+    assign peri_rvalid[W_FFT]         = axi_bus_fft.rvalid;
+    assign peri_bresp[2*W_FFT+:2]     = axi_bus_fft.bresp;
+    assign peri_rresp[2*W_FFT+:2]     = axi_bus_fft.rresp;
+    assign peri_rdata[32*W_FFT+:32]   = axi_bus_fft.rdata;
+
     // -----------------------------------------------------------------
     // I2C master (axi4_lite_i2c). Open-drain pins: the peripheral outputs
     // only an oe (drive low when set); the tri-state here releases the pin
@@ -730,7 +761,24 @@ module top_module (
         plic_irq[PLIC_SRC_I2C]  = i2c_irq;
         plic_irq[PLIC_SRC_SPI]  = spi_irq;
         plic_irq[PLIC_SRC_GPIO] = gpio_irq;
+        plic_irq[PLIC_SRC_FFT]  = fft_irq;
     end
+
+    // -----------------------------------------------------------------
+    // FFT coprocessor (axi4_lite_fft). No pins: the sample buffers are
+    // the peripheral's own BSRAM, so the only thing that leaves the block
+    // is the DONE interrupt. See axi4_lite_fft.sv for the ping-pong
+    // protocol and the register map.
+    // -----------------------------------------------------------------
+    axi4_lite_fft #(
+        .NMAX    (1024),
+        .LOG2NMAX(10)
+    ) u_fft (
+        .clk_i    (clk_core),
+        .rstn_i   (rstn_core),
+        .axi      (axi_bus_fft.slave),
+        .fft_irq_o(fft_irq)
+    );
 
     axi4_lite_plic u_plic (
         .clk_i (clk_core),

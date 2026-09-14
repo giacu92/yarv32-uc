@@ -131,7 +131,7 @@ direct and vectored mode. A trapping instruction is not retired.
 Three interrupt sources: **MSIP** (`msip_peri` MMIO @0x1000_3000), **MTIP**
 (`clint_timer` @0x1000_1000+, 64-bit mtime/mtimecmp), **MEIP** — a minimal
 PLIC-style controller @0x1000_8000 that aggregates the peripheral level IRQs
-(UART / I2C / SPI / GPIO) into meip with cause IDs (CLAIM read, fixed
+(UART / I2C / SPI / GPIO / FFT) into meip with cause IDs (CLAIM read, fixed
 lower-ID-wins priority; ENABLE resets all-ones so pre-PLIC firmware runs
 unchanged). Priority MEI > MSI > MTI. A dedicated trap-write port updates
 mepc/mcause/mtval/mstatus atomically on entry.
@@ -141,11 +141,37 @@ mepc/mcause/mtval/mstatus atomically on entry.
 The CPU exposes three ports: native `imem` (read-only), native `dmem`
 (byte-strobed), and an AXI4-Lite master for peripherals. Native→AXI
 conversion lives inside the CPU, so the board top is pure point-to-point
-wiring. Peripherals sit behind a parametric 1→7 crossbar with a DECERR
+wiring. Peripherals sit behind a parametric 1→8 crossbar with a DECERR
 terminator for unmapped addresses — UART (TX+RX FIFOs, level IRQ), I2C and
 SPI masters, GPIO (4 header pins, edge/level interrupts), machine timer,
-the software-interrupt register, and the PLIC-style interrupt controller
-feeding MEIP.
+the software-interrupt register, the PLIC-style interrupt controller
+feeding MEIP, and the FFT coprocessor.
+
+### FFT coprocessor (`axi4_lite_fft` @0x1000_A000, 8 KiB)
+
+Radix-2 decimation-in-frequency in signed Q15 complex, one butterfly per
+cycle, up to 1024 points. The sample store is the peripheral's **own**
+BSRAM, arranged as a ping-pong pair: the engine transforms frame *k* out of
+one buffer while the CPU fills frame *k+1* through the other, so a
+continuous input stream never stalls the transform and the transform never
+stalls the stream. `START` swaps ownership atomically, which also hands the
+previous frame's result back to the CPU — results are one frame behind, and
+`SWAP` drains the last one without launching another transform.
+
+The window is two 4 KiB pages: control registers at +0x0000
+(`CTRL`/`STATUS`/`IRQ`/`CONF`/`SCALE`/`CYCLES`) and the CPU-owned sample
+buffer at +0x1000. `CONF.LOG2N` picks the size at run time (4 … 1024
+points); `SCALE` is a per-stage divide-by-2 mask whose all-ones reset value
+is the overflow-proof 1/N mode. Output order is natural — the bit-reversal
+a DIF transform would otherwise need is folded into the final stage's write
+address, so it costs no cycles. `DONE` raises PLIC source 5.
+
+Cost, measured with `impl/yosys_estimate.sh` (yosys, not the Gowin
+toolchain — trust its BSRAM/DSP/FF columns, read its LUT count as a
+range): **+7 BSRAM blocks** (16 → 23 of 46), **+4 MULT18X18**, +692
+flip-flops, and 1.8k–2.1k logic cells. Time: 10 · N/2 cycles plus pipeline
+fill, ≈103 µs for 1024 points at 50 MHz. Timing impact is unmeasured —
+yosys produces no slack.
 
 ### Pin assignment (Tang Nano 20k, GW2AR-18C QFN88)
 
@@ -246,9 +272,12 @@ src/rtl/core/  pipeline stages + CPU top + reg file + ALU + trap unit + board to
 src/rtl/bus/   AXI4-Lite interface + master bridge + peripheral crossbar
 src/rtl/utils/ native_ram (Harvard I/D-mem), msip_peri, clint_timer,
                axi4_lite_uart, axi4_lite_i2c, axi4_lite_spi,
-               axi4_lite_gpio, axi4_lite_plic, axi4_lite_xbar (parametric 1→N)
+               axi4_lite_gpio, axi4_lite_plic, axi4_lite_xbar (parametric 1→N),
+               axi4_lite_fft + fft_dpram + fft_twiddle_rom (FFT coprocessor)
+src/scripts/   gen_twiddle.py (regenerates the FFT twiddle ROM module)
 src/phys/      pin assignment (.cst) + timing constraints (.sdc)
-impl/          Gowin EDA project + synthesis/PnR Tcl + reports
+impl/          Gowin EDA project + synthesis/PnR Tcl + reports,
+               yosys_estimate.sh (resource estimate without the Gowin host)
 sim/           Verilator sim, compliance tests, Spike co-sim, firmware oracles
 verible.flags  SystemVerilog formatting policy
 CLAUDE.md      detailed architecture + build guidance (authoritative)
@@ -281,7 +310,8 @@ Done: Harvard split, LSU + forwarding, Zicsr, M-mode traps with all three
 interrupt sources, UART with FIFOs, silicon bring-up, CoreMark, 64-bit
 2-outstanding fetch with instruction buffer, branch predictor, 50 MHz
 closure with the predictor enabled, I2C and SPI masters, GPIO with edge and
-level interrupts, and the PLIC-style cause/claim controller for MEIP.
+level interrupts, the PLIC-style cause/claim controller for MEIP, and the
+ping-pong FFT coprocessor.
 
 Next, in order:
 

@@ -7,7 +7,7 @@ import rv32_pkg::*;
 /**
  * Simulation top (Verilator). Mirrors top_module's peri bus wiring:
  *
- *   CPU.axi_peri -> axi_bus_peri -> axi4_lite_xbar (1->7, base+size)
+ *   CPU.axi_peri -> axi_bus_peri -> axi4_lite_xbar (1->9, base+size)
  *                    |-> u_uart  (0x1000_0000)
  *                    |-> u_timer (0x1000_1000+)
  *                    |-> u_msip  (0x1000_3000)
@@ -16,6 +16,7 @@ import rv32_pkg::*;
  *                    |-> u_gpio  (0x1000_7000)
  *                    |-> u_plic  (0x1000_8000)
  *                    |-> u_fft   (0x1000_A000, 8 KiB)
+ *                    |-> u_i2s   (0x1000_C000)
  * Fetch and the LSU each have a dedicated BSRAM (Harvard). The peri bus
  * carries the MSIP + CLINT timer MMIO slaves behind the peri xbar.
  *
@@ -88,6 +89,7 @@ module sim_top #(
     axi4_lite_if axi_bus_gpio ();
     axi4_lite_if axi_bus_plic ();
     axi4_lite_if axi_bus_fft ();
+    axi4_lite_if axi_bus_i2s ();
 
     assign axi_bus_peri.aclk     = clk_i;
     assign axi_bus_peri.aresetn  = rstn_i;
@@ -107,6 +109,8 @@ module sim_top #(
     assign axi_bus_plic.aresetn  = rstn_i;
     assign axi_bus_fft.aclk      = clk_i;
     assign axi_bus_fft.aresetn   = rstn_i;
+    assign axi_bus_i2s.aclk      = clk_i;
+    assign axi_bus_i2s.aresetn   = rstn_i;
 
     // -----------------------------------------------------------------
     // Native memory ports. Fetch and the LSU each get a dedicated
@@ -134,6 +138,7 @@ module sim_top #(
     wire         spi_irq;
     wire         gpio_irq;
     wire         fft_irq;
+    wire         i2s_irq;
     wire         meip;
 
     // -----------------------------------------------------------------
@@ -281,8 +286,9 @@ module sim_top #(
     //   window 5 -> axi_bus_gpio  (GPIO_BASE      0x1000_7000)
     //   window 6 -> axi_bus_plic  (PLIC_BASE      0x1000_8000)
     //   window 7 -> axi_bus_fft   (FFT_BASE       0x1000_A000, 8 KiB)
+    //   window 8 -> axi_bus_i2s   (I2S_BASE       0x1000_C000)
     // -----------------------------------------------------------------
-    localparam int unsigned PERI_N = 8;
+    localparam int unsigned PERI_N = 9;
 
     logic [         31:0] peri_awaddr;
     logic [         31:0] peri_wdata;
@@ -305,6 +311,7 @@ module sim_top #(
     axi4_lite_xbar #(
         .N(PERI_N),
         .BASES({
+            I2S_BASE,
             FFT_BASE,
             PLIC_BASE,
             GPIO_BASE,
@@ -315,6 +322,7 @@ module sim_top #(
             UART_BASE
         }),
         .SIZES({
+            I2S_SIZE,
             FFT_SIZE,
             PLIC_SIZE,
             GPIO_SIZE,
@@ -584,10 +592,153 @@ module sim_top #(
     assign peri_rresp[14+:2]    = axi_bus_fft.rresp;
     assign peri_rdata[224+:32]  = axi_bus_fft.rdata;
 
+    // Window 8: I2S receiver. An i2s_master_model drives the audio bus
+    // with a known sample stream, so the sim has the one thing the board
+    // gets from a microphone: an externally-clocked I2S frame.
+    //
+    // The stream is SELF-DESCRIBING, which is what lets firmware check it
+    // without knowing when the receiver was enabled: the left word of
+    // frame k is +k and the right word is -(k+1). Reading one left sample
+    // gives k, and every other value follows from it. It also puts a
+    // negative word on every frame, so a broken sign extension cannot
+    // pass.
+    assign axi_bus_i2s.awaddr   = peri_awaddr;
+    assign axi_bus_i2s.wdata    = peri_wdata;
+    assign axi_bus_i2s.wstrb    = peri_wstrb;
+    assign axi_bus_i2s.araddr   = peri_araddr;
+    assign axi_bus_i2s.awvalid  = peri_awvalid[8];
+    assign axi_bus_i2s.wvalid   = peri_wvalid[8];
+    assign axi_bus_i2s.bready   = peri_bready[8];
+    assign axi_bus_i2s.arvalid  = peri_arvalid[8];
+    assign axi_bus_i2s.rready   = peri_rready[8];
+    assign peri_awready[8]      = axi_bus_i2s.awready;
+    assign peri_wready[8]       = axi_bus_i2s.wready;
+    assign peri_bvalid[8]       = axi_bus_i2s.bvalid;
+    assign peri_arready[8]      = axi_bus_i2s.arready;
+    assign peri_rvalid[8]       = axi_bus_i2s.rvalid;
+    assign peri_bresp[16+:2]    = axi_bus_i2s.bresp;
+    assign peri_rresp[16+:2]    = axi_bus_i2s.rresp;
+    assign peri_rdata[256+:32]  = axi_bus_i2s.rdata;
+
+    wire         i2s_bclk;
+    wire         i2s_lrck;
+    wire         i2s_sd;
+    wire         i2s_load;
+    wire         i2s_mic_load;
+    wire         i2s_mic_sd;
+    wire         i2s_drv_bclk;
+    wire         i2s_drv_lrck;
+    wire         i2s_clk_oe;
+
+    // Sample generator, advanced one frame at a time by the model.
+    logic [15:0] i2s_frame_q;
+
+    always_ff @(posedge clk_i) begin
+        if (!rstn_i) begin
+            i2s_frame_q <= '0;
+        end else if (i2s_load) begin
+            i2s_frame_q <= i2s_frame_q + 1'b1;
+        end
+    end
+
+    // 16-bit words: left = +k, right = -(k+1). The model takes them
+    // right-aligned in 32 bits and shifts out the low WLEN bits, MSB first.
+    wire [31:0] i2s_left = {16'h0000, i2s_frame_q};
+    wire [31:0] i2s_right = {16'h0000, (~i2s_frame_q)};  // -(k+1) in 16-bit two's complement
+
+    i2s_master_model #(
+        .BCLK_HALF(4),    // BCLK = 50 MHz / 8 = 6.25 MHz
+        .SLOT_BITS(32),
+        .WLEN     (16),
+        .FORMAT_LJ(1'b0)  // I2S (Philips), the peripheral's reset format
+    ) u_i2s_ext_master (
+        .clk_i  (clk_i),
+        .rstn_i (rstn_i),
+        .left_i (i2s_left),
+        .right_i(i2s_right),
+        .load_o (i2s_load),
+        .bclk_o (i2s_bclk),
+        .lrck_o (i2s_lrck),
+        .sd_o   (i2s_sd)
+    );
+
+    // Pad model, mirroring the board top: when the peripheral is the
+    // master it drives the two clock lines and an INMP441-shaped slave
+    // (i2s_mic_model) answers on them; when it is not, the free-running
+    // external master above owns the whole bus. Both configurations are
+    // reachable from firmware by toggling CTRL.MASTER, which is what lets
+    // sw/peri/i2s test the mode the board actually runs.
+    wire i2s_bclk_pin = i2s_clk_oe ? i2s_drv_bclk : i2s_bclk;
+    wire i2s_lrck_pin = i2s_clk_oe ? i2s_drv_lrck : i2s_lrck;
+    wire i2s_sd_pin = i2s_clk_oe ? i2s_mic_sd : i2s_sd;
+
+    // The mic's own sample stream, self-describing like the external
+    // master's: the word for frame m is m << 4, so firmware can check the
+    // sequence without knowing when it started listening and the low bits
+    // stay clear of the 24-bit word's LSBs. 24-bit, left slot, as an
+    // INMP441 with its L/R pin tied low.
+    logic [15:0] i2s_mic_frame_q;
+
+    always_ff @(posedge clk_i) begin
+        if (!rstn_i) begin
+            i2s_mic_frame_q <= '0;
+        end else if (i2s_mic_load) begin
+            i2s_mic_frame_q <= i2s_mic_frame_q + 1'b1;
+        end
+    end
+
+    i2s_mic_model #(
+        .WLEN     (24),
+        .CHANNEL  (1'b0),  // left slot, L/R tied low
+        .FORMAT_LJ(1'b0)
+    ) u_i2s_mic (
+        .clk_i   (clk_i),
+        .rstn_i  (rstn_i),
+        .bclk_i  (i2s_bclk_pin),
+        .lrck_i  (i2s_lrck_pin),
+        .sample_i({12'h000, i2s_mic_frame_q, 4'h0}),
+        .load_o  (i2s_mic_load),
+        .sd_o    (i2s_mic_sd)
+    );
+
+    // 2-flop synchronizer on all three audio lines, exactly the chain the
+    // board top puts on the pads. The peripheral's contract is that it
+    // receives pre-synchronized inputs, so the sim must not hand it the
+    // raw model outputs -- otherwise the chain that only exists on the
+    // board is never exercised here.
+    logic [1:0] i2s_bclk_sync_q;
+    logic [1:0] i2s_lrck_sync_q;
+    logic [1:0] i2s_sd_sync_q;
+
+    always_ff @(posedge clk_i) begin
+        if (!rstn_i) begin
+            i2s_bclk_sync_q <= 2'b00;
+            i2s_lrck_sync_q <= 2'b00;
+            i2s_sd_sync_q   <= 2'b00;
+        end else begin
+            i2s_bclk_sync_q <= {i2s_bclk_sync_q[0], i2s_bclk_pin};
+            i2s_lrck_sync_q <= {i2s_lrck_sync_q[0], i2s_lrck_pin};
+            i2s_sd_sync_q   <= {i2s_sd_sync_q[0], i2s_sd_pin};
+        end
+    end
+
+    axi4_lite_i2s u_i2s (
+        .clk_i       (clk_i),
+        .rstn_i      (rstn_i),
+        .axi         (axi_bus_i2s.slave),
+        .i2s_bclk_i  (i2s_bclk_sync_q[1]),
+        .i2s_lrck_i  (i2s_lrck_sync_q[1]),
+        .i2s_sd_i    (i2s_sd_sync_q[1]),
+        .i2s_bclk_o  (i2s_drv_bclk),
+        .i2s_lrck_o  (i2s_drv_lrck),
+        .i2s_clk_oe_o(i2s_clk_oe),
+        .i2s_irq_o   (i2s_irq)
+    );
+
     // Source IDs (rv32_pkg::PLIC_SRC_*), assigned by NAME like in the
     // board top so the two cannot drift: 0=none, 1=UART, 2=I2C, 3=SPI,
-    // 4=GPIO, 5-15 reserved (tied off). MSIP/MTIP do NOT pass through
-    // here — they are CLINT-style direct bits into csr_regfile.
+    // 4=GPIO, 5=FFT, 6=I2S, 7-15 reserved (tied off). MSIP/MTIP do NOT
+    // pass through here — they are CLINT-style direct bits into csr_regfile.
     logic [PLIC_SRC_N-1:0] plic_irq;
     always_comb begin
         plic_irq                = '0;
@@ -596,6 +747,7 @@ module sim_top #(
         plic_irq[PLIC_SRC_SPI]  = spi_irq;
         plic_irq[PLIC_SRC_GPIO] = gpio_irq;
         plic_irq[PLIC_SRC_FFT]  = fft_irq;
+        plic_irq[PLIC_SRC_I2S]  = i2s_irq;
     end
 
     // FFT coprocessor. Pin-less: its sample buffers are private BSRAM, so

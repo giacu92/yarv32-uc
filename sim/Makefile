@@ -37,7 +37,10 @@ RTL := \
 	../src/rtl/utils/fft_dpram.sv \
 	../src/rtl/utils/fft_twiddle_rom.sv \
 	../src/rtl/utils/axi4_lite_fft.sv \
+	../src/rtl/utils/axi4_lite_i2s.sv \
 	i2c_slave_model.sv \
+	i2s_master_model.sv \
+	i2s_mic_model.sv \
 	sim_top.sv
 
 # Harvard topology: native u_imem (read-only) + u_dmem (byte-strobed) on
@@ -126,7 +129,8 @@ REGRESS_TESTS := \
 	guitar_tuner:guitar_tuner/build-sim:5000000:probe@0x3000=600d \
 	i2c_reg:peri/i2c_reg/build:1000000:probe@0x3000=600d \
 	spi_loop:peri/spi_loop/build:400000:probe@0x3000=600d \
-	i2c_scan:peri/i2c_scan/build:5000000:probe@0x3000=600d
+	i2c_scan:peri/i2c_scan/build:5000000:probe@0x3000=600d \
+	i2s:peri/i2s/build:400000:probe@0x3000=600d
 
 # ----------------------------------------------------------------------
 # lint — dead wires, unread bits, unused parameters

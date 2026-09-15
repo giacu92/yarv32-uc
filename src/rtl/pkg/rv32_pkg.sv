@@ -187,6 +187,8 @@ package rv32_pkg;
     // meip; MSIP/MTIP stay direct (CLINT-style, outside the PLIC).
     // FFT: 8 KiB coprocessor window (CSR page + DATA page), see
     // axi4_lite_fft.sv; its DONE interrupt is PLIC source 5.
+    // I2S: receive-only I2S slave (an external mic/codec supplies BCLK and
+    // LRCK), RX FIFO + watermark interrupt, PLIC source 6.
     // 0x1000_4000..0x1000_4FFF is deliberately unmapped: it held an SDIO
     // controller that was dropped from this branch. 0x1000_9000..0x1000_9FFF
     // is unmapped too, so the FFT's 8 KiB window stays 8 KiB aligned. An
@@ -213,6 +215,10 @@ package rv32_pkg;
     // aligned. 0x1000_9000 is left unmapped to keep that alignment.
     localparam logic [XLEN-1:0] FFT_BASE = 32'h1000_A000;
     localparam logic [XLEN-1:0] FFT_SIZE = 32'h0000_2000;
+    // I2S receiver (axi4_lite_i2s), 4 KiB. Sits above the FFT's 8 KiB
+    // window, which ends at 0x1000_BFFF.
+    localparam logic [XLEN-1:0] I2S_BASE = 32'h1000_C000;
+    localparam logic [XLEN-1:0] I2S_SIZE = 32'h0000_1000;
 
     // ---------------------------------------------------------------
     // PLIC source IDs (bit positions in the PLIC's pending/enable
@@ -227,15 +233,16 @@ package rv32_pkg;
     localparam int unsigned PLIC_SRC_SPI = 3;
     localparam int unsigned PLIC_SRC_GPIO = 4;
     localparam int unsigned PLIC_SRC_FFT = 5;
+    localparam int unsigned PLIC_SRC_I2S = 6;
 
     // ---------------------------------------------------------------
     // Bus address decode. The LSU steers its own accesses on
     // addr[PERI_ADDR_BIT]: =1 goes out the CPU's peri AXI4-Lite master
-    // (UART / CLINT / MSIP / I2C / SPI / GPIO / PLIC / FFT), =0 goes to the
-    // native D-mem.
+    // (UART / CLINT / MSIP / I2C / SPI / GPIO / PLIC / FFT / I2S), =0 goes
+    // to the native D-mem.
     // Fetch has its own dedicated native I-mem port (Harvard), so no
     // crossbar splits memory from peripherals; the only xbar is the
-    // parametric 1->8 peri mux at the board top. Default bit 28 (0x1000_0000+ is
+    // parametric 1->9 peri mux at the board top. Default bit 28 (0x1000_0000+ is
     // peripheral), a conventional MMIO base.
     // Moveable here so the map lives in one place, not hardcoded in the
     // LSU or the board top.

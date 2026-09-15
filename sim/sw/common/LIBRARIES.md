@@ -31,6 +31,7 @@ Peripheral base addresses (from `rv32_pkg.sv`):
 | GPIO       | 0x1000_7000 | `gpio.h`  |
 | PLIC       | 0x1000_8000 | `plic.h`  |
 | FFT        | 0x1000_A000 | `fft.h`   |
+| I2S        | 0x1000_C000 | `i2s.h`   |
 
 Device drivers sit on top of those: `bmp280.h`, `ds3231.h`, `ssd1306.h`
 (+ `ssd1306_text.h` for a font) and `w25q.h` over I2C/SPI, and
@@ -285,6 +286,79 @@ DONE raises PLIC source 5; `fft_irq_enable()` arms it and
 `fft_irq_clear()` is what completes it (the PLIC's CLAIM read is
 side-effect-free, so a handler that skips it re-takes forever). Worked
 example: `sim/sw/peri/fft`.
+
+## i2s.h
+
+The I2S receiver. Receive only, in either clock role.
+
+Listening to a device that clocks the bus itself (the reset state):
+
+```c
+#include "i2s.h"
+
+int l, r;
+
+i2s_begin(I2S_WLEN_24, I2S_CHAN_STEREO, I2S_FMT_I2S);
+i2s_flush();                    /* start from "whatever arrives now" */
+
+for (;;) {
+    i2s_read_frame(&l, &r);     /* a frame-aligned pair, sign-extended */
+    ...
+}
+```
+
+Driving a microphone that cannot clock itself — an INMP441, say, which has
+no oscillator and is an I2S slave like this peripheral, so with both sides
+listening nothing ever happens:
+
+```c
+unsigned int fs = i2s_master_hz(15625, 32);   /* BCLK 1 MHz, 64-BCLK frame */
+
+i2s_begin(I2S_WLEN_24, I2S_CHAN_LEFT, I2S_FMT_I2S);   /* L/R tied low */
+
+int s;
+i2s_read_wait(&s);              /* the mic now answers our clock */
+```
+
+**Check what `i2s_master_hz()` returns, and build the rest of the signal
+chain on that, not on what you asked for.** Only rates that divide the core
+clock exactly are reachable: from 50 MHz with a 64-BCLK frame the set is
+`390625/(DIV+1)` Hz, which is an integer only when `DIV+1` is a power of
+five — so **15625 Hz is the one usable audio rate and 16000 Hz is not
+reachable at all**. Asking for 16000 silently gives 15625.
+
+Words come back **sign-extended to 32 bits** whatever WLEN says, so a
+24-bit sample is a normal negative `int` when it should be. `i2s_read()`
+returns the channel (`I2S_CH_LEFT` / `I2S_CH_RIGHT`) and -1 when the FIFO
+is empty; `i2s_read_wait()` spins for one, `i2s_read_buf()` for many, and
+`i2s_read_frame()` discards words until it can return a left/right pair.
+Single-channel work is cheaper at the receiver than at the CPU: with
+`I2S_CHAN_LEFT` the right words are dropped before the FIFO, so the same
+16 entries hold twice as many frames.
+
+**The FIFO is 16 words, and that is the real constraint.** At 48 kHz
+stereo it fills in 167 µs (about 1 ms at the 15625 Hz mono rate above), so a polling loop that goes away for longer
+than that loses samples — `i2s_overrun()` is the sticky record of it, and
+`i2s_overrun_clear()` the acknowledgement. The interrupt path is the
+alternative: `i2s_set_watermark(n)` plus `i2s_irq_enable(1, 0)` raises
+PLIC source 6 while `RX_LEVEL ≥ n`. Note that this one is a **level**, not
+a latched flag — servicing it means draining the FIFO below the watermark,
+and a handler that drains fewer words is simply re-entered rather than
+left with a full FIFO and a cleared flag.
+
+Clock ratio, the thing that breaks first on an unusual setup:
+`f(core) ≥ 4 × f(BCLK)`, because the receiver oversamples the bus in the
+core domain instead of clocking off BCLK. 12.5 MHz at 50 MHz, against
+3.072 MHz for a 48 kHz / 32-bit / stereo frame. Master mode meets it by
+construction; it only binds on an external master.
+
+Framing is `I2S_FMT_I2S` (WS changes one BCLK before the MSB) or
+`I2S_FMT_LJ` (MSB on the WS edge), WS low = left. Padding bits between the
+end of a word and the next WS transition are discarded, so the slot length
+never has to be configured — a 24-bit word works in a 32- or 64-BCLK slot
+with the same settings. If a link is silent, `i2s_pin_levels()` read twice
+says whether the master is clocking at all. Worked example:
+`sim/sw/peri/i2s`.
 
 ## mcp3208.h
 

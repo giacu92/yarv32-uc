@@ -131,7 +131,7 @@ direct and vectored mode. A trapping instruction is not retired.
 Three interrupt sources: **MSIP** (`msip_peri` MMIO @0x1000_3000), **MTIP**
 (`clint_timer` @0x1000_1000+, 64-bit mtime/mtimecmp), **MEIP** — a minimal
 PLIC-style controller @0x1000_8000 that aggregates the peripheral level IRQs
-(UART / I2C / SPI / GPIO / FFT) into meip with cause IDs (CLAIM read, fixed
+(UART / I2C / SPI / GPIO / FFT / I2S) into meip with cause IDs (CLAIM read, fixed
 lower-ID-wins priority; ENABLE resets all-ones so pre-PLIC firmware runs
 unchanged). Priority MEI > MSI > MTI. A dedicated trap-write port updates
 mepc/mcause/mtval/mstatus atomically on entry.
@@ -141,11 +141,11 @@ mepc/mcause/mtval/mstatus atomically on entry.
 The CPU exposes three ports: native `imem` (read-only), native `dmem`
 (byte-strobed), and an AXI4-Lite master for peripherals. Native→AXI
 conversion lives inside the CPU, so the board top is pure point-to-point
-wiring. Peripherals sit behind a parametric 1→8 crossbar with a DECERR
+wiring. Peripherals sit behind a parametric 1→9 crossbar with a DECERR
 terminator for unmapped addresses — UART (TX+RX FIFOs, level IRQ), I2C and
 SPI masters, GPIO (4 header pins, edge/level interrupts), machine timer,
 the software-interrupt register, the PLIC-style interrupt controller
-feeding MEIP, and the FFT coprocessor.
+feeding MEIP, the FFT coprocessor, and the I2S receiver.
 
 ### FFT coprocessor (`axi4_lite_fft` @0x1000_A000, 8 KiB)
 
@@ -173,6 +173,48 @@ flip-flops, and 1.8k–2.1k logic cells. Time: 10 · N/2 cycles plus pipeline
 fill, ≈103 µs for 1024 points at 50 MHz. Timing impact is unmeasured —
 yosys produces no slack.
 
+### I2S receiver (`axi4_lite_i2s` @0x1000_C000)
+
+Receive only — the intended chain is mic → I2S → RX FIFO → CPU → FFT
+coprocessor — in **either clock role**, selected by `CTRL.MASTER`:
+
+- **slave** (reset): an external device supplies BCLK and LRCK and the two
+  clock pads stay released;
+- **master**: the peripheral generates BCLK = `clk/(2·(DIV+1))` and LRCK
+  every `SLOT` bit clocks and drives them out. This is not symmetry for its
+  own sake — an INMP441 is *itself* a clock slave, so with both sides
+  listening nothing ever clocks the bus, and no firmware fixes that.
+
+On this board `DIV=24 / SLOT=32` is the setting that matters: BCLK exactly
+1.000 MHz and fs exactly 15625 Hz. 50 MHz = 2⁷·5⁸, so an integer sample
+rate out of a 64-BCLK frame needs `DIV+1` to be a power of five, and 25 is
+the only one that lands in the audio band — **16 kHz is not reachable from
+this clock.**
+
+BCLK is deliberately *not* treated as a clock, in either mode. The receiver
+oversamples the synchronized audio bus in the core domain and samples SD on
+each detected BCLK rising edge, which keeps the design at one clock domain
+with no CDC — at the price of needing `f(core) ≥ 4 × f(BCLK)`. That is
+12.5 MHz of BCLK at 50 MHz, against the 3.072 MHz a 48 kHz / 32-bit /
+stereo frame uses; a simulation assertion fails the run if a testbench
+violates the ratio. In master mode the receive path is unchanged — it
+samples the *pads*, so it sees its own clocks coming back delayed exactly
+as the device's data is.
+
+Both common framings are supported (I2S/Philips, where WS changes one BCLK
+before the MSB, and left-justified, where the MSB rides the WS edge), with
+8/16/24/32-bit words sign-extended to 32 bits on read, a per-channel filter
+(stereo, left only, right only), and a 16-entry RX FIFO carrying each
+word's channel tag. Bits between the end of a word and the next WS
+transition are padding and are discarded, so the slot length never has to
+be configured. `RX_LEVEL ≥ WATER` and the sticky overrun raise PLIC source
+6; the RX condition is a **level**, not a latched flag, because the FIFO is
+already the event record.
+
+Cost, measured with `impl/yosys_estimate.sh`: **no BSRAM and no DSP** (the
+FIFO infers 9 LUT-RAMs), +194 flip-flops, and roughly 1k logic cells for the
+block plus the wider crossbar. Timing impact is unmeasured.
+
 ### Pin assignment (Tang Nano 20k, GW2AR-18C QFN88)
 
 Canonical source is `src/phys/rv32imac_Zicsr_Zifencei.cst`; this table is
@@ -194,6 +236,9 @@ its readable form. All IOs are LVCMOS33.
 | `gpio_io[1]` | 42 | pull-up, DRIVE=8 | free right-header IO |
 | `gpio_io[2]` | 71 | pull-up, DRIVE=8 | free right-header IO |
 | `gpio_io[3]` | 72 | pull-up, DRIVE=8 | free right-header IO |
+| `i2s_bclk_io` | 80 | pull-down, DRIVE=8 | I2S bit clock — driven in master mode, released in slave mode |
+| `i2s_lrck_io` | 81 | pull-down, DRIVE=8 | I2S word select (low = left), same direction rule |
+| `i2s_sd_i` | 82 | pull-down | I2S serial data in |
 | `led_o[0]` | 15 | pull-up, DRIVE=8 | onboard LED — mirrors GPIO0 when DIR=out |
 | `led_o[1]` | 16 | pull-up, DRIVE=8 | onboard LED — slow counter bit |
 | `led_o[2]` | 17 | pull-up, DRIVE=8 | onboard LED — slow counter bit |
@@ -201,8 +246,10 @@ its readable form. All IOs are LVCMOS33.
 
 The I2C pins carry only the weak internal pull-up as a fallback — a real
 bus needs external pull-ups. GPIO pins read a defined 1 when released or
-unconnected, which matches the sim's loopback model. PIN80–85 (the onboard
-microSD slot) are free; the SDIO controller that used them was dropped.
+unconnected, which matches the sim's loopback model. The I2S pins pull
+down, so an unconnected bus reads a static 0 — no BCLK, therefore nothing
+captured, rather than noise shifted into the FIFO. PIN83–85 (the rest of
+the onboard microSD slot, whose SDIO controller was dropped) stay free.
 
 ### Clocking
 

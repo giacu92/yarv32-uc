@@ -18,6 +18,7 @@ seven MMIO slaves behind the parametric 1→N xbar (`axi4_lite_xbar`, windows fr
 | `axi4_lite_gpio` | `0x1000_7000` | 4 pins, looped back onto themselves (pull-up model) |
 | `axi4_lite_plic` | `0x1000_8000` | cause/claim MEIP over the peripheral IRQs |
 | `axi4_lite_fft` | `0x1000_A000` | FFT coprocessor, 8 KiB (CSR page + sample DATA page), DONE IRQ → PLIC src 5 |
+| `axi4_lite_i2s` | `0x1000_C000` | I2S receiver; `i2s_master_model.sv` drives the bus in slave mode, `i2s_mic_model.sv` (INMP441 shape) answers our clocks in master mode. RX IRQ → PLIC src 6 |
 
 `sim_top.sv` replicates the board top's wiring so memories can be preloaded
 and CPU per-stage taps logged. The UART is driven both ways: `uart_rxd_i` is a
@@ -155,6 +156,19 @@ Independent harnesses (no CPU) that drive a single slave from a C++ BFM.
   model alone proves only that the RTL matches the model, so the
   independent DFT is what catches a shared misunderstanding. Worst
   measured deviation from the double reference is 1.8 LSB → 9316 checks.
+- **`hw/i2s_tb/`** — I2S receiver: reset values, both framings (I2S and
+  left-justified), every WLEN encoding with its sign extension, per-entry
+  channel tags and the CHAN filter, padding bits, FIFO fill to depth,
+  sticky overrun with W1C, the watermark IRQ as a *level* (it reasserts
+  with no clear in between), and ENABLE/BCLK-stopped quiet. The BFM
+  bit-bangs the audio bus itself rather than instantiating
+  `i2s_master_model`, which is the point: it can send what a real master
+  cannot — a word cut short by an early WS transition, a slot exactly as
+  long as the word, a 64-BCLK slot, a receiver enabled mid-word. Master
+  mode gets the same treatment: the generated BCLK period and frame length
+  are measured against CLKDIV, LRCK is checked to move only on falling BCLK
+  edges, and the BFM closes the loop by playing an INMP441-shaped 24-bit
+  slave against the clocks the peripheral generates → 940 checks.
 
 ```
 cd hw/uart_tb         && make run   # 146 checks, 0 failures
@@ -166,6 +180,7 @@ cd hw/spi_tb          && make run
 cd hw/gpio_tb         && make run
 cd hw/plic_tb         && make run
 cd hw/fft_tb          && make run   # 9316 checks, 0 failures
+cd hw/i2s_tb          && make run   # 940 checks, 0 failures
 ```
 
 ## Co-sim vs Spike (`cosim/`)
@@ -472,11 +487,11 @@ bp_pred         PASS   425 cyc
 ...
 plic_gpio       PASS   941 cyc
 fft             PASS   3197 cyc
-guitar_tuner    PASS   3016457 cyc
+guitar_tuner    PASS   3007738 cyc
 uart_echo       PASS   29148 cyc, TX ends GOOD
 harvard_oracle  PASS   parks clean
 
-19 passed, 0 failed, 0 skipped
+20 passed, 0 failed, 0 skipped
 ```
 
 Three kinds of check, because the tests really do report differently, and the
@@ -533,11 +548,31 @@ exits non-zero. A test harness that has never failed has not been tested.
   Numeric accuracy is `hw/fft_tb`'s job, not this file's. Result @0x3000;
   the first failing step number, the claim ID and the cycle count stay in
   `.data` for a board post-mortem.
+- **`sw/peri/i2s/`** — I2S receiver end-to-end oracle, written against
+  `common/i2s.h` + `common/plic.h`. Covers what `hw/i2s_tb` cannot: that
+  the peripheral is reachable through the real LSU + bridge + crossbar
+  path, that its window decodes one page above the FFT's 8 KiB window, and
+  that the watermark interrupt reaches `mip.MEIP` through the PLIC as
+  source 6, woken from `wfi`. It runs both clock roles, switched by
+  `CTRL.MASTER` the way the pads switch on the board: `i2s_master_model.sv`
+  drives the whole bus in slave mode, and `i2s_mic_model.sv` — an INMP441
+  shape, 24 bits in the left slot with the other slot silent — answers the
+  peripheral's own generated clocks in master mode, which is what the
+  guitar tuner runs. The external master drives a **self-describing**
+  stream — the left word of frame
+  k is +k and the right word is −(k+1) — which is what makes every check
+  independent of when the receiver was enabled: one left word gives k and
+  the rest follows. Every frame also carries a negative word, so a broken
+  sign extension cannot pass. Result @0x3000; the first failing step
+  number and the IRQ debug fields stay in `.data`.
 - **`sw/guitar_tuner/`** — a guitar tuner, and the FFT coprocessor's first
-  real application: MCP3208 SPI ADC at 16 kHz → 2nd-order CIC decimation
-  by 8 → windowed 1024-point transform at 2 kHz → fundamental pick →
-  parabolic interpolation → nearest chromatic note and cents → SSD1306
-  needle gauge. Neither device is modelled here, so the harness builds
+  real application: INMP441 I2S microphone at 15625 Hz → 2nd-order CIC
+  decimation by 8 → windowed 1024-point transform at 1953.125 Hz →
+  fundamental pick → parabolic interpolation → nearest chromatic note and
+  cents → SSD1306 needle gauge. The I2S peripheral runs in **master mode**
+  here, because an INMP441 is itself a clock slave and nothing else on the
+  board generates an audio clock. Neither device is modelled here, so the
+  harness builds
   **twice**: `build/` is the board image, and `build-sim/`
   (`-DTUNER_SIM=1`) swaps the ADC for a synthetic oscillator and the
   display for the UART. It then checks three things.
@@ -624,7 +659,7 @@ filled" from "the poll never returned" when a board goes quiet mid-line.
   stop, UART RX frame driver).
 - `imem.hex`/`dmem.hex` — Harvard oracle preload.
 - `Makefile` — build/run rules (`RUN_ARGS` forwards plusargs).
-- `hw/{native_mem_tb,native_ram64_tb,ram_tb,uart_tb,i2c_tb,spi_tb,gpio_tb,plic_tb,fft_tb}/` — compliance tests.
+- `hw/{native_mem_tb,native_ram64_tb,ram_tb,uart_tb,i2c_tb,spi_tb,gpio_tb,plic_tb,fft_tb,i2s_tb}/` — compliance tests.
 - `cosim/` — shared co-sim assets (`cosim_diff.py`, `build_spike.sh`) +
   `quicksort/`, `coremark/`, `ecall/` harnesses.
 - `sw/` — C → image flow (see `sw/README.md`) and the oracles above.

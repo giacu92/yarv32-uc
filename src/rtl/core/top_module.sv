@@ -16,7 +16,7 @@ import rv32_pkg::*;
  *   native_ram (u_imem)   native_ram (u_dmem)         axi_bus_peri
  *   (instr)                (data + .rodata + stack)      |
  *                                                        +-- axi4_lite_xbar
- *                                                        |     (peri 1->7,
+ *                                                        |     (peri 1->9,
  *                                                        |      base+size)
  *                                                        |
  *                            0x1000_0000..0FFF ----------+--> uart_i  (UART)
@@ -27,13 +27,14 @@ import rv32_pkg::*;
  *                            0x1000_7000..7FFF ----------+--> u_gpio  (GPIO)
  *                            0x1000_8000..8FFF ----------+--> u_plic  (PLIC)
  *                            0x1000_A000..BFFF ----------+--> u_fft   (FFT)
+ *                            0x1000_C000..CFFF ----------+--> u_i2s   (I2S RX)
  *
  *   Fetch and the LSU no longer contend: each has a dedicated native
  *   BSRAM port. AXI survives only for peripherals (the peri bridge is
  *   inside the CPU). The board top is pure point-to-point wires — the
  *   LSU steers addr[PERI_ADDR_BIT] internally, and the peri xbar here
  *   splits the peri bus into UART / CLINT timer / MSIP / I2C / SPI /
- *   GPIO / PLIC by base+size. The window bases come from rv32_pkg (UART_BASE /
+ *   GPIO / PLIC / FFT / I2S by base+size. The window bases come from rv32_pkg (UART_BASE /
  *   MTIMER_BASE / MSIP_PERI_ADDR / I2C_BASE / SPI_BASE / GPIO_BASE /
  *   PLIC_BASE) so the map is defined in exactly one place.
  *
@@ -74,6 +75,15 @@ module top_module (
     // GPIO (4 pins, push-pull; DIR=0 releases the pad, and the .cst's
     // PULL_MODE=UP holds a released pad high). Pin assignments in the .cst.
     inout wire [3:0] gpio_io,
+
+    // I2S receiver. BCLK and LRCK are BIDIRECTIONAL pads: the peripheral
+    // drives them in master mode (which is what an INMP441 needs -- the
+    // mic is itself a clock slave) and releases them when an external
+    // device is the master. SD is always an input; there is no transmit
+    // path. Pin assignments in the .cst.
+    inout wire i2s_bclk_io,
+    inout wire i2s_lrck_io,
+    input wire i2s_sd_i,
 
     // Debug LEDs: led_o[0] = stall indicator, led_o[3:1] = alive counter.
     output wire [3:0] led_o
@@ -199,6 +209,7 @@ module top_module (
     //   axi_bus_gpio  : xbar m5 -> GPIO   slave (GPIO_BASE       0x1000_7000).
     //   axi_bus_plic  : xbar m6 -> PLIC   slave (PLIC_BASE       0x1000_8000).
     //   axi_bus_fft   : xbar m7 -> FFT    slave (FFT_BASE        0x1000_A000, 8 KiB).
+    //   axi_bus_i2s   : xbar m8 -> I2S    slave (I2S_BASE        0x1000_C000).
     // -----------------------------------------------------------------
     axi4_lite_if axi_bus_peri ();
     axi4_lite_if axi_bus_msip ();
@@ -209,6 +220,7 @@ module top_module (
     axi4_lite_if axi_bus_gpio ();
     axi4_lite_if axi_bus_plic ();
     axi4_lite_if axi_bus_fft ();
+    axi4_lite_if axi_bus_i2s ();
 
     // Single clock domain: the whole fabric (CPU bridge, memories, the
     // buses) runs on clk_core / rstn_core. There is NO clock-domain
@@ -232,6 +244,8 @@ module top_module (
     assign axi_bus_plic.aresetn  = rstn_core;
     assign axi_bus_fft.aclk      = clk_core;
     assign axi_bus_fft.aresetn   = rstn_core;
+    assign axi_bus_i2s.aclk      = clk_core;
+    assign axi_bus_i2s.aresetn   = rstn_core;
 
     // Debug tap: decode or execute stage stall.
     //wire         dbg_stall;
@@ -268,6 +282,7 @@ module top_module (
     wire         spi_irq;
     wire         gpio_irq;
     wire         fft_irq;
+    wire         i2s_irq;
     wire         meip;
 
     // -----------------------------------------------------------------
@@ -391,11 +406,12 @@ module top_module (
     //   window 5 -> axi_bus_gpio  (GPIO_BASE       0x1000_7000, 4 KiB)
     //   window 6 -> axi_bus_plic  (PLIC_BASE       0x1000_8000, 4 KiB)
     //   window 7 -> axi_bus_fft   (FFT_BASE        0x1000_A000, 8 KiB)
+    //   window 8 -> axi_bus_i2s   (I2S_BASE        0x1000_C000, 4 KiB)
     // 0x1000_4000 is unmapped (it held the SDIO controller until it was
     // dropped from this branch), and 0x1000_9000 is unmapped to keep the
     // FFT's 8 KiB window 8 KiB aligned; an access to either gets a DECERR.
     // -----------------------------------------------------------------
-    localparam int unsigned PERI_N = 8;
+    localparam int unsigned PERI_N = 9;
 
     // Window indices: the one constant each glue block below indexes off
     // (awvalid[W_x], bresp[2*W_x+:2], rdata[32*W_x+:32]), so a renumbered
@@ -410,6 +426,7 @@ module top_module (
     localparam int unsigned W_GPIO = 5;
     localparam int unsigned W_PLIC = 6;
     localparam int unsigned W_FFT = 7;
+    localparam int unsigned W_I2S = 8;
 
     logic [         31:0] peri_awaddr;
     logic [         31:0] peri_wdata;
@@ -432,6 +449,7 @@ module top_module (
     axi4_lite_xbar #(
         .N(PERI_N),
         .BASES({
+            rv32_pkg::I2S_BASE,
             rv32_pkg::FFT_BASE,
             rv32_pkg::PLIC_BASE,
             rv32_pkg::GPIO_BASE,
@@ -442,6 +460,7 @@ module top_module (
             rv32_pkg::UART_BASE
         }),
         .SIZES({
+            rv32_pkg::I2S_SIZE,
             rv32_pkg::FFT_SIZE,
             rv32_pkg::PLIC_SIZE,
             rv32_pkg::GPIO_SIZE,
@@ -627,6 +646,24 @@ module top_module (
     assign peri_rresp[2*W_FFT+:2]     = axi_bus_fft.rresp;
     assign peri_rdata[32*W_FFT+:32]   = axi_bus_fft.rdata;
 
+    assign axi_bus_i2s.awaddr         = peri_awaddr;
+    assign axi_bus_i2s.wdata          = peri_wdata;
+    assign axi_bus_i2s.wstrb          = peri_wstrb;
+    assign axi_bus_i2s.araddr         = peri_araddr;
+    assign axi_bus_i2s.awvalid        = peri_awvalid[W_I2S];
+    assign axi_bus_i2s.wvalid         = peri_wvalid[W_I2S];
+    assign axi_bus_i2s.bready         = peri_bready[W_I2S];
+    assign axi_bus_i2s.arvalid        = peri_arvalid[W_I2S];
+    assign axi_bus_i2s.rready         = peri_rready[W_I2S];
+    assign peri_awready[W_I2S]        = axi_bus_i2s.awready;
+    assign peri_wready[W_I2S]         = axi_bus_i2s.wready;
+    assign peri_bvalid[W_I2S]         = axi_bus_i2s.bvalid;
+    assign peri_arready[W_I2S]        = axi_bus_i2s.arready;
+    assign peri_rvalid[W_I2S]         = axi_bus_i2s.rvalid;
+    assign peri_bresp[2*W_I2S+:2]     = axi_bus_i2s.bresp;
+    assign peri_rresp[2*W_I2S+:2]     = axi_bus_i2s.rresp;
+    assign peri_rdata[32*W_I2S+:32]   = axi_bus_i2s.rdata;
+
     // -----------------------------------------------------------------
     // I2C master (axi4_lite_i2c). Open-drain pins: the peripheral outputs
     // only an oe (drive low when set); the tri-state here releases the pin
@@ -745,6 +782,68 @@ module top_module (
     );
 
     // -----------------------------------------------------------------
+    // I2S receiver (axi4_lite_i2s). Either clock role, selected by
+    // CTRL.MASTER: in master mode the peripheral generates BCLK and LRCK
+    // from clk_core and drives the pads (DIV=24 / SLOT=32 gives BCLK =
+    // 1.000 MHz and fs = 15625 Hz exactly, which is what the INMP441 the
+    // guitar tuner uses needs -- that mic is a clock slave and cannot be
+    // driven by another slave); in slave mode it releases them and listens.
+    // Either way it adds no clock domain: the audio bus is OVERSAMPLED in
+    // clk_core, which is why the design still has a single domain and no
+    // CDC. That imposes f(clk_core) >= 4 x f(BCLK) on an external master;
+    // at 50 MHz the limit is 12.5 MHz, against the 3.072 MHz a 48 kHz
+    // 32-bit stereo frame needs.
+    //
+    // All three pads are asynchronous to clk_core, so they are
+    // double-flopped here exactly like uart_rxd_i and the GPIO pads: the
+    // peripheral's contract is that it receives synchronized inputs, and
+    // its edge detect feeds a shift register where a metastable sample
+    // would corrupt a whole word, not just one bit. The chain resets to 0
+    // (an unconnected, undriven bus), which cannot fake a BCLK rising
+    // edge out of reset.
+    // -----------------------------------------------------------------
+    // Pad glue for the two clock lines. Per-signal tri-state, like the
+    // GPIO pads: drive when the peripheral is the master, release
+    // otherwise. The peripheral ALWAYS samples the pad, never its own
+    // generated net, so master mode and slave mode share one sampler and
+    // the device's SD and our own clocks take the same path back in.
+    wire i2s_bclk_drv;
+    wire i2s_lrck_drv;
+    wire i2s_clk_oe;
+
+    assign i2s_bclk_io = i2s_clk_oe ? i2s_bclk_drv : 1'bz;
+    assign i2s_lrck_io = i2s_clk_oe ? i2s_lrck_drv : 1'bz;
+
+    logic [1:0] i2s_bclk_sync_q;
+    logic [1:0] i2s_lrck_sync_q;
+    logic [1:0] i2s_sd_sync_q;
+
+    always_ff @(posedge clk_core) begin
+        if (!rstn_core) begin
+            i2s_bclk_sync_q <= 2'b00;
+            i2s_lrck_sync_q <= 2'b00;
+            i2s_sd_sync_q   <= 2'b00;
+        end else begin
+            i2s_bclk_sync_q <= {i2s_bclk_sync_q[0], i2s_bclk_io};
+            i2s_lrck_sync_q <= {i2s_lrck_sync_q[0], i2s_lrck_io};
+            i2s_sd_sync_q   <= {i2s_sd_sync_q[0], i2s_sd_i};
+        end
+    end
+
+    axi4_lite_i2s u_i2s (
+        .clk_i       (clk_core),
+        .rstn_i      (rstn_core),
+        .axi         (axi_bus_i2s.slave),
+        .i2s_bclk_i  (i2s_bclk_sync_q[1]),
+        .i2s_lrck_i  (i2s_lrck_sync_q[1]),
+        .i2s_sd_i    (i2s_sd_sync_q[1]),
+        .i2s_bclk_o  (i2s_bclk_drv),
+        .i2s_lrck_o  (i2s_lrck_drv),
+        .i2s_clk_oe_o(i2s_clk_oe),
+        .i2s_irq_o   (i2s_irq)
+    );
+
+    // -----------------------------------------------------------------
     // PLIC (axi4_lite_plic). Aggregates the peripheral level IRQs into
     // meip with cause IDs (see the peripheral's header for the claim
     // contract). irq_i bit i = source ID i, assigned by NAME from the
@@ -762,6 +861,7 @@ module top_module (
         plic_irq[PLIC_SRC_SPI]  = spi_irq;
         plic_irq[PLIC_SRC_GPIO] = gpio_irq;
         plic_irq[PLIC_SRC_FFT]  = fft_irq;
+        plic_irq[PLIC_SRC_I2S]  = i2s_irq;
     end
 
     // -----------------------------------------------------------------

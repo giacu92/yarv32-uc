@@ -40,6 +40,19 @@ set_false_path -from [get_ports {rst_i}]
 # crossing safe; there is no launch clock to relate it to, so cut it.
 set_false_path -from [get_ports {uart_rxd_i}]
 
+# I2S receiver pins. In slave mode BCLK, LRCK and SD all come from an
+# external audio device running off its own oscillator, so they are
+# asynchronous to clk_core exactly like uart_rxd_i; in master mode the two
+# clock pads are driven from clk_core and come back in through the same
+# input path, which is a round trip through a pad at 1 MHz and not a timed
+# path either. top_module double-flops all three before the peripheral, and
+# the peripheral OVERSAMPLES BCLK rather than clocking off it -- BCLK must
+# NOT be declared as a clock in either mode, since that would create a
+# domain the design does not have.
+set_false_path -from [get_ports {i2s_bclk_io}]
+set_false_path -from [get_ports {i2s_lrck_io}]
+set_false_path -from [get_ports {i2s_sd_i}]
+
 # Debug LEDs are not timing-critical (human eye).
 set_false_path -to [get_ports {led_o[*]}]
 

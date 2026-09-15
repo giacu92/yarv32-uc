@@ -1,21 +1,26 @@
 #include "sys.h"
 #include "uart.h"
 #include "fft.h"
-#include "mcp3208.h"
+#include "i2s.h"
 
 #if !TUNER_SIM
 #include "ssd1306_text.h"
 #endif
 
 /*
- * Guitar tuner: SPI ADC in, FFT coprocessor for the pitch, SSD1306 OLED
- * out with a needle gauge.
+ * Guitar tuner: INMP441 I2S microphone in, FFT coprocessor for the pitch,
+ * SSD1306 OLED out with a needle gauge.
  *
  * Signal chain
  * ------------
- *   MCP3208 (12-bit, SPI, mid-rail biased audio)
- *     -> TUNER_N samples paced off mcycle at TUNER_FS_HZ
- *     -> DC removal, triangular window, 4-bit left shift into Q15
+ *   INMP441 (24-bit I2S MEMS microphone, left slot)
+ *     -> axi4_lite_i2s in MASTER mode, which is what paces the whole
+ *        program: the FPGA generates BCLK/LRCK, the mic answers, and a
+ *        sample arrives every 1/TUNER_FS_IN_HZ whether the CPU is ready or
+ *        not
+ *     -> 24-bit sample >> 8 into Q15
+ *     -> 2nd-order CIC decimation by TUNER_DECIM
+ *     -> DC removal, triangular window
  *     -> axi4_lite_fft, 1/N scaling, natural output order
  *     -> magnitude spectrum, fundamental pick, parabolic interpolation
  *     -> nearest chromatic note + cents
@@ -53,10 +58,18 @@
  *
  * Board wiring
  * ------------
- *   ADC   MCP3208 on the SPI master: SCK/MOSI/MISO/CS as in the .cst.
- *         Audio must be biased to Vref/2 before CH0 -- the part is
- *         unipolar and will clip the whole negative half otherwise.
+ *   MIC   INMP441 on the I2S pins: SCK -> PIN80 (BCLK), WS -> PIN81
+ *         (LRCK), SD -> PIN82, L/R -> GND (left slot), VDD 3.3 V.
+ *         No bias network and no anti-alias op-amp: the part is digital
+ *         and outputs 24-bit two's complement, which is the main reason
+ *         this replaced the MCP3208 front end.
  *   OLED  SSD1306 128x64 at 0x3C on the I2C master.
+ *
+ * WHY THE PERIPHERAL RUNS IN MASTER MODE, which is not a detail:
+ * an INMP441 is itself an I2S clock slave -- it has no oscillator and
+ * generates nothing. With the FPGA also a slave, nobody clocks the bus and
+ * no amount of firmware fixes it. So axi4_lite_i2s generates BCLK and
+ * LRCK here (i2s_master_hz), and the mic answers.
  *
  * Simulation
  * ----------
@@ -78,7 +91,7 @@
 #define TUNER_N       (1u << TUNER_LOG2N)
 
 /*
- * SAMPLE RATES, and why the analysis rate is 2 kHz and not 20.
+ * SAMPLE RATES, and why the analysis rate is ~2 kHz and not 20.
  *
  * The transform's rate is NOT an audio-quality choice, it is a
  * time-frequency trade: bin spacing is fs/N and frame time is N/fs, so
@@ -98,46 +111,70 @@
  * which puts the filter's nulls exactly on the frequencies that fold to
  * DC and does it with two adders instead of an analog brick wall.
  *
- * Keep an analog RC in front regardless: the decimator cannot remove
- * anything that aliased on the way into the ADC, only what aliases on the
- * way down to 2 kHz.
+ * The mic's own decimation filter handles everything above ITS Nyquist
+ * (7.8 kHz), so unlike the old analog front end there is no RC network to
+ * get right -- but the fold from 7.8 kHz down to 977 Hz is still ours, and
+ * that is what the CIC below is for.
+ *
+ * WHY 15625 Hz AND NOT 16000. The input rate is now set by the FPGA, since
+ * the peripheral is the I2S master: fs = clk / (4 * (DIV+1) * SLOT). With
+ * clk = 50 MHz = 2^7 x 5^8 and a standard 64-BCLK frame, an integer rate
+ * needs (DIV+1) to be a power of 5, and 25 is the only one in the audio
+ * band -- 15625 Hz, BCLK exactly 1.000 MHz. 16 kHz is NOT reachable from
+ * this clock, and picking a nearby non-integer rate would make every
+ * frequency constant below an approximation. So the whole chain is built
+ * on 15625 Hz, and the analysis rate is 15625/8 = 1953.125 Hz.
+ *
+ * That last number is not an integer, which is why the constants below
+ * carry the rate in MILLI-Hz: 1953125 mHz is exact, and every conversion
+ * stays in integer arithmetic.
  */
-#define TUNER_FS_IN_HZ 16000u
+#define TUNER_FS_IN_HZ 15625u
 #define TUNER_DECIM    8u
-#define TUNER_FS_HZ    (TUNER_FS_IN_HZ / TUNER_DECIM)
-
-/* Cycles between ADC conversions, for the mcycle-paced acquisition loop.
- * 3125 at 50 MHz; an MCP3208 exchange at 1 MHz SCLK is 24 clocks, about
- * 1200 cycles, so there is room. */
-#define TUNER_SAMPLE_CYCLES (TUNER_CORE_HZ / TUNER_FS_IN_HZ)
+#define TUNER_I2S_SLOT 32u                             /* BCLK per channel slot */
+#define TUNER_FS_MHZ   ((TUNER_FS_IN_HZ * 1000u) / TUNER_DECIM) /* 1953125 mHz */
 
 /* Search band. Wide enough for D2 (73.4 Hz) to G#4 (415.3 Hz), the
  * chromatic table below, with a little margin either side. */
 #define TUNER_FMIN_HZ 70u
 #define TUNER_FMAX_HZ 420u
-#define TUNER_KMIN    ((TUNER_FMIN_HZ * TUNER_N) / TUNER_FS_HZ)
-#define TUNER_KMAX    (((TUNER_FMAX_HZ * TUNER_N) + TUNER_FS_HZ - 1u) / TUNER_FS_HZ)
+#define TUNER_KMIN    ((TUNER_FMIN_HZ * TUNER_N * 1000u) / TUNER_FS_MHZ)
+#define TUNER_KMAX \
+    (((TUNER_FMAX_HZ * TUNER_N * 1000u) + TUNER_FS_MHZ - 1u) / TUNER_FS_MHZ)
 
-/* Bin -> centi-Hz, as a reduced fraction so the arithmetic stays in 32
- * bits: f_cHz = kq8 * NUM / DEN, with kq8 the peak position in 1/256 of
- * a bin. For fs = 2000 and N = 1024 that is 12500/16384, exact. The
- * assertion below is what catches a changed fs or N. */
-#define TUNER_CHZ_NUM 12500u
-#define TUNER_CHZ_DEN 16384u
-_Static_assert(TUNER_CHZ_NUM * (TUNER_N * 256u) == (TUNER_FS_HZ * 100u) * TUNER_CHZ_DEN,
-               "TUNER_CHZ_NUM/DEN must equal fs*100 / (N*256), reduced");
+/*
+ * Bin -> centi-Hz: f_cHz = kq8 * fs_mHz / (10 * N * 256), with kq8 the
+ * peak position in 1/256 of a bin. At fs = 1953.125 Hz and N = 1024 that
+ * reduces to kq8 * 390625 / 2^19 -- exact, no rounding of the constant
+ * itself.
+ *
+ * The two assertions are the reduction, split so neither overflows 32
+ * bits: 2^SHIFT = 512*N pins the denominator to N, and NUM*5 = fs_mHz
+ * pins the numerator to the sample rate. Change either the rate or the
+ * transform size and the build stops here instead of reporting wrong
+ * frequencies.
+ */
+#define TUNER_CHZ_NUM   390625u
+#define TUNER_CHZ_SHIFT 19u
+_Static_assert((1u << TUNER_CHZ_SHIFT) == 512u * TUNER_N,
+               "TUNER_CHZ_SHIFT must be log2(512*N)");
+_Static_assert(TUNER_CHZ_NUM * 5u == TUNER_FS_MHZ,
+               "TUNER_CHZ_NUM must be fs_mHz/5");
 
-/* ADC channel and SPI clock. 1 MHz keeps the MCP3208 inside its 2.7 V
- * rating; raise it to 2 MHz if the part runs at 5 V. */
-#define TUNER_ADC_CH  0u
-#define TUNER_SPI_HZ  1000000u
-#define TUNER_I2C_HZ  400000u
+#define TUNER_I2C_HZ 400000u
 
-/* 12-bit centred codes are +/-2048; shift into the Q15 the FFT wants. */
-#define TUNER_IN_SHIFT (15u - (MCP3208_BITS - 1u))
+/* The INMP441 sends 24 bits, MSB first, in the left slot (L/R tied low).
+ * Shift the top 16 into the Q15 the rest of the chain works in: the
+ * bottom 8 bits of a MEMS mic are its own noise floor, and keeping them
+ * would only make the CIC accumulators wider. */
+#define TUNER_IN_SHIFT 8u
 
-/* Below this peak magnitude there is nothing to tune. Full scale into a
- * triangular window lands near 8000, so this is about -32 dB. */
+/* Below this peak magnitude there is nothing to tune. With 1/N scaling a
+ * sinusoid of Q15 amplitude A lands near A/4 after the triangular window,
+ * so 200 is about A = 800, i.e. -32 dBFS. An INMP441 is -26 dBFS at 94
+ * dBSPL, so a guitar played near the mic clears this comfortably; drop it
+ * if the mic sits across the room, raise it if a noisy room reports
+ * phantom notes. */
 #define TUNER_SIGNAL_FLOOR 200u
 
 /* A quarter of the strongest bin is "a real partial". */
@@ -287,12 +324,13 @@ static unsigned int tuner_sim_phase;
 static unsigned int tuner_sim_inc;
 
 /*
- * Phase increment per INPUT sample: 2^32 / (fs_in * 100) = 2684.3546 for
- * fs_in = 16 kHz. Split into an integer and a thousandths term rather
- * than rounded to 2684, which would be 1.3e-4 off and cost 0.22 cents --
- * visible against a 3-cent budget. The split form is 2.6e-7 off, which is
- * not. A 64-bit intermediate would be exact and would also pull
- * __udivdi3, which is not linked.
+ * Phase increment per INPUT sample: 2^32 / (fs * 100) per centi-Hz, which
+ * is 2748.779 at the 15625 Hz input rate and 21990.233 at the 1953.125 Hz
+ * analysis rate. Split into an integer and a thousandths term rather than
+ * rounded, which would be ~1e-4 off and cost ~0.2 cents -- visible against
+ * a 3-cent budget. The split form is ~1e-7 off, which is not. A 64-bit
+ * intermediate would be exact and would also pull __udivdi3, which is not
+ * linked.
  */
 static unsigned int tuner_sim_pure;
 
@@ -301,12 +339,12 @@ static void tuner_sim_set(unsigned int f_cHz, unsigned int decim, int pure)
     tuner_sim_phase = 0u;
     tuner_sim_pure  = (unsigned int)pure;
 
-    /* Only the two rates the self-check uses. 2^32/(2000*100) =
-     * 21474.836 and 2^32/(16000*100) = 2684.3546. */
+    /* Only the two rates the self-check uses. 2^32/(1953.125*100) =
+     * 21990.233 and 2^32/(15625*100) = 2748.779. */
     if (decim == 1u) {
-        tuner_sim_inc = f_cHz * 21474u + (f_cHz * 836u) / 1000u;
+        tuner_sim_inc = f_cHz * 21990u + (f_cHz * 233u) / 1000u;
     } else {
-        tuner_sim_inc = f_cHz * 2684u + (f_cHz * 355u) / 1000u;
+        tuner_sim_inc = f_cHz * 2748u + (f_cHz * 779u) / 1000u;
     }
 }
 
@@ -331,7 +369,7 @@ static int tuner_sin(unsigned int phase)
     return (quad & 2u) ? -v : v;
 }
 
-static int tuner_adc_sample(void)
+static int tuner_mic_sample(void)
 {
     int s;
 
@@ -347,14 +385,28 @@ static int tuner_adc_sample(void)
     }
     tuner_sim_phase += tuner_sim_inc;
 
-    /* Back down to a 12-bit centred ADC code, which is what the real
-     * path produces. */
-    return s >> 4;
+    /* Q15, the same scale the real path produces after its shift. */
+    return s;
 }
 #else
-static int tuner_adc_sample(void)
+/*
+ * One microphone sample, blocking. The I2S stream is the program's clock:
+ * the mic answers the BCLK this peripheral generates, so a sample appears
+ * every 1/TUNER_FS_IN_HZ regardless of what the CPU is doing, and reading
+ * the FIFO is what paces the acquisition loop. No mcycle busy-wait, which
+ * is what the ADC front end needed.
+ *
+ * The RX FIFO is 16 words -- about 1 ms at this rate -- so anything that
+ * blocks the loop for longer loses samples. The display push is the only
+ * such thing and it happens between frames, where a discontinuity costs
+ * nothing: tuner_acquire() flushes first, so each frame is contiguous.
+ */
+static int tuner_mic_sample(void)
 {
-    return mcp3208_centred(TUNER_ADC_CH);
+    int s;
+
+    (void)i2s_read_wait(&s);
+    return s >> TUNER_IN_SHIFT;
 }
 #endif
 
@@ -372,7 +424,7 @@ static int tuner_adc_sample(void)
  * and needs no table -- Hann would need 1024 Q15 entries or a cosine this
  * build has no way to compute.
  *
- * DECIMATION. The ADC runs at TUNER_FS_IN_HZ and a second-order CIC
+ * DECIMATION. The mic runs at TUNER_FS_IN_HZ and a second-order CIC
  * drops it by TUNER_DECIM to the analysis rate. A CIC of order N and
  * rate R is N integrators at the fast rate, a downsample, and N combs at
  * the slow rate -- no multipliers, no coefficients, and its nulls land
@@ -388,10 +440,12 @@ static int tuner_adc_sample(void)
  * of each frame is two output samples long and lands where the window is
  * zero anyway.
  *
- * On the board the sample clock is a busy-wait on mcycle. The display
- * push is deliberately NOT done here: 1 KiB over I2C at 400 kHz is ~25
- * ms, which at the 16 kHz input rate would swallow four hundred sample
- * slots.
+ * On the board the sample clock is the I2S stream itself -- the mic is
+ * clocked by this peripheral and answers on its own schedule, so reading
+ * the FIFO paces the loop and there is no mcycle busy-wait left. The FIFO
+ * is flushed first, so the frame is contiguous even though the previous
+ * frame's display push (1 KiB over I2C at 400 kHz, ~25 ms) overran it.
+ * The display push is deliberately NOT done here for that reason.
  */
 static void tuner_acquire(void)
 {
@@ -400,21 +454,19 @@ static void tuner_acquire(void)
     int          sum = 0;
     /* CIC state: two integrators, two comb delays. */
     int          i1 = 0, i2 = 0, d1 = 0, d2 = 0;
+
 #if !TUNER_SIM
-    unsigned int next = sys_cycle();
+    /* Start the frame on a fresh sample: whatever queued up during the
+     * previous frame's display push is stale by up to 25 ms, and a frame
+     * stitched across that gap is a frame with a step in it. */
+    i2s_flush();
 #endif
 
     for (i = 0; i < TUNER_N; i++) {
         int s, c1, c2;
 
         for (d = 0; d < tuner_decim; d++) {
-#if !TUNER_SIM
-            /* Signed difference so the comparison survives mcycle wrapping. */
-            while ((int)(sys_cycle() - next) < 0) {
-            }
-            next += TUNER_SAMPLE_CYCLES;
-#endif
-            i1 += tuner_adc_sample();
+            i1 += tuner_mic_sample();
             i2 += i1;
         }
 
@@ -423,7 +475,7 @@ static void tuner_acquire(void)
         c2 = c1 - d2;
         d2 = c1;
 
-        /* Divide out the CIC's gain, R^order, back to the ADC's own
+        /* Divide out the CIC's gain, R^order, back to the input's own
          * scale. An arithmetic shift, so it rounds toward -inf; the bias
          * is half an LSB of a 12-bit code and the DC removal below eats
          * it whole. At R = 1 the shift is 0 and the whole structure
@@ -445,7 +497,6 @@ static void tuner_acquire(void)
         if (w > 32767) {
             w = 32767;
         }
-        s = (s << TUNER_IN_SHIFT);
         fft_write_real(i, (s * w) >> 15);
     }
 }
@@ -555,6 +606,27 @@ static void tuner_note_of(unsigned int f_cHz, int *note, int *cents)
     *cents = best_c;
 }
 
+/*
+ * Peak position (1/256 of a bin) -> centi-Hz.
+ *
+ * The exact expression is kq8 * 390625 >> 19, and 390625 needs 19 bits
+ * while kq8 reaches ~57000, so the product does NOT fit in 32 bits. Split
+ * the multiplicand instead of the constant: six bits of kq8 go into the
+ * second term, and each half is rounded rather than truncated, which
+ * keeps the whole conversion within 1 centi-Hz -- 0.2 cents at the low E,
+ * against a 3-cent estimator. A 64-bit intermediate would be exact and
+ * would pull __udivdi3, which is not linked.
+ */
+static unsigned int tuner_kq8_to_cHz(unsigned int kq8)
+{
+    unsigned int hi = kq8 >> 6;
+    unsigned int lo = kq8 & 63u;
+    unsigned int sh = TUNER_CHZ_SHIFT - 6u;
+
+    return ((hi * TUNER_CHZ_NUM + (1u << (sh - 1u))) >> sh)
+         + ((lo * TUNER_CHZ_NUM + (1u << (TUNER_CHZ_SHIFT - 1u))) >> TUNER_CHZ_SHIFT);
+}
+
 /* One frame, from the transformed spectrum already sitting in the FFT's
  * CPU-visible buffer. */
 static void tuner_analyse(tuner_result_t *r)
@@ -575,7 +647,7 @@ static void tuner_analyse(tuner_result_t *r)
     }
 
     kq8      = (unsigned int)(((int)k << 8) + tuner_interp_q8((unsigned int)k));
-    r->f_cHz = (kq8 * TUNER_CHZ_NUM) / TUNER_CHZ_DEN;
+    r->f_cHz = tuner_kq8_to_cHz(kq8);
     r->valid = 1;
     tuner_note_of(r->f_cHz, &r->note, &r->cents);
 }
@@ -864,6 +936,73 @@ static unsigned int tuner_check_alias(void)
     return fails;
 }
 
+/*
+ * The one part of the board path the synthetic oscillator cannot cover:
+ * the I2S front end itself. sim_top answers master-mode clocks with an
+ * INMP441-shaped slave (24-bit, left slot, a ramp for data), so this
+ * checks what the tuner depends on and the oscillator bypasses -- that
+ * the peripheral produces the designed sample rate, that the mic's words
+ * arrive in order, and that the rate is what the frequency constants
+ * assume. It does NOT check pitch: the model plays a ramp, not a note.
+ */
+static unsigned int tuner_check_i2s(void)
+{
+    unsigned int fails = 0u, fs, i;
+    int          prev, cur;
+    unsigned int t0, dt;
+
+    fs = i2s_master_hz(TUNER_FS_IN_HZ, TUNER_I2S_SLOT);
+    uart_puts("I2S master fs ");
+    tuner_put_uint(fs);
+    uart_puts(" Hz\r\n");
+    if (fs != TUNER_FS_IN_HZ) {
+        uart_puts("   ^ rate is not the one the constants assume\r\n");
+        fails++;
+    }
+
+    i2s_begin(I2S_WLEN_24, I2S_CHAN_LEFT, I2S_FMT_I2S);
+    i2s_flush();
+
+    /* The model's word for frame m is m << 4, left slot only. */
+    (void)i2s_read_wait(&prev);
+    t0 = sys_cycle();
+    for (i = 0; i < 4u; i++) {
+        if (i2s_read_wait(&cur) != I2S_CH_LEFT) {
+            uart_puts("   ^ word came back on the wrong channel\r\n");
+            fails++;
+            break;
+        }
+        if (cur != prev + 16) {
+            uart_puts("   ^ mic stream lost a frame\r\n");
+            fails++;
+            break;
+        }
+        prev = cur;
+    }
+    dt = (sys_cycle() - t0) / 4u;
+
+    /* One frame is TUNER_CORE_HZ / fs core cycles: 3200 at 50 MHz and
+     * 15625 Hz. A wrong divider shows up here as a wrong period long
+     * before it shows up as a wrong pitch. */
+    uart_puts("frame period ");
+    tuner_put_uint(dt);
+    uart_puts(" cycles\r\n");
+    {
+        unsigned int want = TUNER_CORE_HZ / TUNER_FS_IN_HZ;
+        unsigned int lo = want - want / 16u, hi = want + want / 16u;
+        if (dt < lo || dt > hi) {
+            uart_puts("   ^ not the designed frame period\r\n");
+            fails++;
+        }
+    }
+
+    /* Hand the bus back: the pitch cases below feed the estimator from
+     * the synthetic oscillator, not from the mic. */
+    i2s_end();
+    i2s_master_off();
+    return fails;
+}
+
 int main(void)
 {
     tuner_result_t r;
@@ -871,6 +1010,8 @@ int main(void)
 
     uart_puts("\r\nguitar tuner self-check\r\n");
     fft_begin(TUNER_LOG2N);
+
+    fails += tuner_check_i2s();
 
     /* Pitch cases run with the decimator as a pass-through and the
      * oscillator at the analysis rate: same estimator, an eighth of the
@@ -946,7 +1087,24 @@ int main(void)
 
     uart_puts("\r\nYARV guitar tuner\r\n");
 
-    mcp3208_begin(TUNER_SPI_HZ);
+    /* The peripheral clocks the mic: an INMP441 generates nothing on its
+     * own. The rate it reports back is the one the chain is built on --
+     * 15625 Hz is exact from a 50 MHz core, 16000 Hz is not reachable at
+     * all (see the SAMPLE RATES note above), so a mismatch here means the
+     * core clock moved and every frequency constant below is now wrong. */
+    {
+        unsigned int fs = i2s_master_hz(TUNER_FS_IN_HZ, TUNER_I2S_SLOT);
+
+        uart_puts("I2S master, fs = ");
+        tuner_put_uint(fs);
+        uart_puts(" Hz\r\n");
+        if (fs != TUNER_FS_IN_HZ) {
+            uart_puts("!! not the designed rate -- pitches will be off by "
+                      "that ratio\r\n");
+        }
+    }
+    i2s_begin(I2S_WLEN_24, I2S_CHAN_LEFT, I2S_FMT_I2S);
+
     i2c_begin_hz(TUNER_I2C_HZ);
 
     if (ssd1306_begin(SSD1306_ADDR) != I2C_OK) {
@@ -978,6 +1136,16 @@ int main(void)
         tuner_analyse(&r);
         tuner_render(&r);
         tuner_report(&r);
+
+        /* An overrun INSIDE a frame means the acquisition loop could not
+         * keep up with the mic, which would corrupt the spectrum rather
+         * than merely interrupt it -- worth saying out loud. (The gap
+         * around the display push does not show up here: tuner_acquire()
+         * flushes, and flushing clears the flag.) */
+        if (i2s_overrun()) {
+            uart_puts("!! I2S overrun during acquisition\r\n");
+            i2s_overrun_clear();
+        }
     }
 }
 

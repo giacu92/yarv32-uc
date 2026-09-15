@@ -1,16 +1,20 @@
-# Guitar tuner: SPI ADC -> FFT coprocessor -> SSD1306 needle gauge.
+# Guitar tuner: INMP441 I2S mic -> FFT coprocessor -> SSD1306 needle gauge.
 #
 #   make          board build   -> build/imem.hex + build/dmem.hex
 #   make sim      self-check    -> build-sim/imem.hex + build-sim/dmem.hex
 #   make show     disassemble the board build
 #   make clean    remove both build directories
 #
-# The board build drives real hardware: an MCP3208 on the SPI master (audio
-# biased to Vref/2 into CH0) and an SSD1306 128x64 at 0x3C on the I2C
-# master. Neither is modelled in the simulator.
+# The board build drives real hardware: an INMP441 I2S microphone on the
+# I2S pins (SCK->PIN80, WS->PIN81, SD->PIN82, L/R->GND) with the peripheral
+# in MASTER mode -- the mic is itself a clock slave, so the FPGA has to
+# clock it -- and an SSD1306 128x64 at 0x3C on the I2C master. Neither
+# device is modelled in the simulator.
 #
-# `make sim` (-DTUNER_SIM=1) swaps the ADC for a synthetic oscillator and
-# the display for the UART. It checks the reported note and cents against a
+# `make sim` (-DTUNER_SIM=1) swaps the mic for a synthetic oscillator and
+# the display for the UART. It still checks the I2S front end against the
+# sim's INMP441-shaped model (rate, ordering, frame period) -- what it
+# cannot do is play a note into it. It checks the reported note and cents against a
 # table of known frequencies, that silence reads as silence, and that the
 # CIC decimator rejects an out-of-band tone by at least 18 dB. It exercises
 # the whole chain except the two peripherals -- decimator, window, FFT

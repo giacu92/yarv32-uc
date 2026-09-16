@@ -132,6 +132,44 @@
  * carry the rate in MILLI-Hz: 1953125 mHz is exact, and every conversion
  * stays in integer arithmetic.
  */
+/*
+ * HOP -- how often a new transform is launched, in decimated samples.
+ *
+ * The window stays TUNER_N long, so the RESOLUTION does not change: bins
+ * are fs/N = 1.907 Hz whatever the hop is. What the hop changes is how
+ * often that window is re-examined. At 256 (75% overlap) a new reading
+ * lands every 256/1953.125 = 131 ms instead of every 524 ms, which is the
+ * difference between a needle that steps and a needle that moves.
+ *
+ * What it does NOT buy, and this is the usual misunderstanding: each
+ * reading still averages the last 0.52 s of signal. Overlap re-samples the
+ * same sliding window more often; it does not shorten the window.
+ *
+ * Cost is negligible -- the transform is 103 us against a 131 ms hop --
+ * but note that the whole window has to be rewritten into the coprocessor
+ * every time, not just the new samples: after START the CPU gets the OTHER
+ * ping-pong buffer, which holds the previous RESULT, not the previous
+ * input.
+ */
+#define TUNER_HOP 256u
+
+/*
+ * DC blocker, replacing the per-frame mean.
+ *
+ *   y[n] = x[n] - x[n-1] + a*y[n-1],   a = 1 - 2^-TUNER_DC_SHIFT
+ *
+ * A mean needs the whole frame before it can be subtracted, which was fine
+ * when frames were independent and is not when samples stream into a ring:
+ * it would mean a second pass over 1024 samples at every hop. This runs
+ * once per sample and keeps no history.
+ *
+ * THE POLE IS THE THING TO GET RIGHT. The corner is (1-a)*fs/(2*pi): at
+ * shift 8 and fs = 1953.125 that is 1.2 Hz, invisible under an 82 Hz low
+ * E. An aggressive a -- 0.9, say -- puts the corner at 31 Hz and tilts
+ * exactly the bottom of the guitar's range. Bigger shift = gentler.
+ */
+#define TUNER_DC_SHIFT 8u
+
 #define TUNER_FS_IN_HZ 15625u
 #define TUNER_DECIM    8u
 #define TUNER_I2S_SLOT 32u                             /* BCLK per channel slot */
@@ -184,11 +222,12 @@ _Static_assert(TUNER_CHZ_NUM * 5u == TUNER_FS_MHZ,
  * pitches out of the noise between plucks. Catching hard and releasing
  * soft does both.
  *
- * The hold is the other half. A frame is 0.52 s, so even the release
- * threshold loses a decaying string well before the player has finished
- * turning the peg; TUNER_HOLD_FRAMES keeps the last reading on screen
- * after the signal is gone, and the display marks it as held rather than
- * pretending it is live.
+ * The hold is the other half. Even the release threshold loses a decaying
+ * string well before the player has finished turning the peg;
+ * TUNER_HOLD_FRAMES keeps the last reading on screen after the signal is
+ * gone, and the display marks it as held rather than pretending it is
+ * live. It is counted in HOPS, so at TUNER_HOP = 256 (131 ms) 24 of them
+ * is about 3 seconds -- change the hop and this moves with it.
  *
  * Both numbers are room-dependent and meant to be adjusted: raise
  * ATTACK if a noisy room reports notes with nothing played, lower it if a
@@ -196,7 +235,42 @@ _Static_assert(TUNER_CHZ_NUM * 5u == TUNER_FS_MHZ,
  */
 #define TUNER_FLOOR_ATTACK 60u
 #define TUNER_FLOOR_HOLD   20u
-#define TUNER_HOLD_FRAMES  6u
+#define TUNER_HOLD_FRAMES  24u
+
+/*
+ * Console reporting rate, in hops.
+ *
+ * At one line per hop the console is 7.6 lines/s, which is unreadable and
+ * was not the intent: the report exists to diagnose a board, and a board
+ * is diagnosed from what CHANGES. So a line goes out when the note or the
+ * valid/held state changes, and otherwise once every TUNER_REPORT_HOPS
+ * (about a second) so the cents are still visible while a peg is turning.
+ *
+ * Not removed, and worth saying why: this print is what identified both
+ * faults of the first board session -- an overrun that turned out to be a
+ * false positive, and a threshold too high for a mic at arm's length.
+ * Set to 1 for the old line-per-hop behaviour.
+ */
+#define TUNER_REPORT_HOPS 8u
+
+/*
+ * Needle animation.
+ *
+ * The estimate only changes once per hop, but two consecutive estimates
+ * share 75% of their window, so the needle's TARGET moves in small steps
+ * and a display that jumps straight to each one reads as stuttering. The
+ * needle is therefore redrawn TUNER_ANIM_STEPS times per hop, each time a
+ * fraction of the way toward the current target -- the same trick every
+ * commercial tuner uses, and it changes nothing about the measurement.
+ *
+ * At 4 steps a redraw lands every 33 ms. Cost is bounded by the page hash:
+ * only rows 32..47 change while the needle moves, that is 2 pages = 256
+ * bytes = ~6 ms of I2C, and when the needle has converged nothing is sent
+ * at all.
+ */
+#define TUNER_ANIM_STEPS 4u
+_Static_assert(TUNER_HOP % TUNER_ANIM_STEPS == 0u,
+               "TUNER_HOP must divide evenly into TUNER_ANIM_STEPS");
 
 /* A quarter of the strongest bin is "a real partial". */
 #define TUNER_PEAK_FRACTION 4u
@@ -313,6 +387,33 @@ typedef struct {
 /* Magnitude of every usable bin. Read once per frame so the peak search
  * and the interpolation work on memory instead of re-reading MMIO. */
 static unsigned short tuner_mag[TUNER_N / 2u];
+
+/*
+ * The sample ring: TUNER_N decimated, DC-blocked samples, written
+ * continuously and read as a window at every hop. Power-of-two size, so
+ * the wrap is a mask.
+ */
+static short        tuner_ring[TUNER_N];
+static unsigned int tuner_ring_pos;    /* next write slot = oldest sample */
+static unsigned int tuner_ring_count;  /* total samples ever written */
+
+/* Decimator and DC blocker state, persistent across calls: the input is
+ * drained in whatever size chunks happen to be available, so neither the
+ * CIC phase nor the filter history can live in a local. */
+static int          tuner_cic_i1, tuner_cic_i2, tuner_cic_d1, tuner_cic_d2;
+static unsigned int tuner_cic_phase;
+static int          tuner_dc_x1, tuner_dc_y;
+
+/*
+ * Samples still needed before the window can be trusted again.
+ *
+ * A gap in the stream (an overrun) is not a missing sample, it is a STEP
+ * in the middle of the window, which smears the whole spectrum. Rather
+ * than display a reading computed across one, the window is declared dirty
+ * and nothing is analysed until TUNER_N clean samples have replaced it.
+ * Set to TUNER_N at start-up too, since an empty ring is the same problem.
+ */
+static unsigned int tuner_dirty = TUNER_N;
 
 /* The floor in force for the current frame: ATTACK while nothing is
  * being tracked, HOLD once a note has been caught (see the note above).
@@ -435,132 +536,163 @@ static int tuner_mic_sample(void)
 }
 #else
 /*
- * One microphone sample, blocking. The I2S stream is the program's clock:
- * the mic answers the BCLK this peripheral generates, so a sample appears
- * every 1/TUNER_FS_IN_HZ regardless of what the CPU is doing, and reading
- * the FIFO is what paces the acquisition loop. No mcycle busy-wait, which
- * is what the ADC front end needed.
- *
- * The RX FIFO is 16 words -- about 1 ms at this rate -- so anything that
- * blocks the loop for longer loses samples. The display push is the only
- * such thing and it happens between frames, where a discontinuity costs
- * nothing: tuner_acquire() flushes first, so each frame is contiguous.
+ * Unused on the board: tuner_pump() reads the FIFO directly so that it can
+ * check for an overrun on the same pass, and tuner_drain() takes the
+ * non-blocking path. Kept as the sim build's hook only.
  */
-static int tuner_mic_sample(void)
-{
-    int s;
-
-    (void)i2s_read_wait(&s);
-    return s >> TUNER_IN_SHIFT;
-}
 #endif
 
 /*
- * Fill the CPU-visible FFT buffer with one windowed frame.
+ * One input sample -> decimator -> DC blocker -> ring.
  *
- * Two passes over the buffer, not one, because the DC offset is only
- * known once every sample has been taken: pass one stores raw codes and
- * accumulates the sum, pass two reads each back, removes the mean,
- * windows it and writes it again. A one-pole high-pass would be single
- * pass but would tilt the low end of the band, which is precisely where
- * the low E sits.
+ * DECIMATION. The mic runs at TUNER_FS_IN_HZ and a second-order CIC drops
+ * it by TUNER_DECIM to the analysis rate. A CIC of order N and rate R is N
+ * integrators at the fast rate, a downsample, and N combs at the slow rate
+ * -- no multipliers, no coefficients, and its nulls land exactly on the
+ * multiples of the output rate, which is precisely where everything that
+ * aliases to DC comes from. Order 2 buys about 30 dB at the worst fold
+ * against 15 dB for a plain boxcar, for one more adder.
+ *
+ * The integrators are allowed to wrap. That is not sloppiness: a CIC is
+ * correct under two's-complement wrapping as long as the accumulator is
+ * wide enough for the filter's own gain (R^order = 64 here), because the
+ * comb stage subtracts the wrap back out.
+ *
+ * All the state is static because this is called from two places with
+ * different chunk sizes -- the blocking pump and the opportunistic drain
+ * that runs between display chunks -- and a CIC phase in a local would
+ * restart the decimation pattern at every call.
+ */
+static void tuner_push_input(int x)
+{
+    int c1, c2, s, y;
+
+#if !TUNER_SIM
+    /* Raw swing since the last hop, for the no-signal report: it is the
+     * mic's own number, before the decimator and the window, and it is
+     * what separates a dead bus from a quiet room. */
+    if (x < tuner_raw_min) {
+        tuner_raw_min = x;
+    }
+    if (x > tuner_raw_max) {
+        tuner_raw_max = x;
+    }
+#endif
+
+    tuner_cic_i1 += x;
+    tuner_cic_i2 += tuner_cic_i1;
+
+    if (++tuner_cic_phase < tuner_decim)
+        return;
+    tuner_cic_phase = 0u;
+
+    c1           = tuner_cic_i2 - tuner_cic_d1;
+    tuner_cic_d1 = tuner_cic_i2;
+    c2           = c1 - tuner_cic_d2;
+    tuner_cic_d2 = c1;
+
+    /* Divide out the CIC's gain, R^order, back to the input's own scale.
+     * An arithmetic shift, so it rounds toward -inf; the bias is half an
+     * LSB and the DC blocker below eats it whole. At R = 1 the shift is 0
+     * and the whole structure collapses to an identity, which is what lets
+     * the self-check bypass it. */
+    s = c2 >> tuner_cic_shift;
+
+    /* DC blocker (see TUNER_DC_SHIFT): y += (x - x1) - y/2^k. */
+    y            = tuner_dc_y + (s - tuner_dc_x1) - (tuner_dc_y >> TUNER_DC_SHIFT);
+    tuner_dc_x1  = s;
+    tuner_dc_y   = y;
+
+    if (y > 32767) {
+        y = 32767;
+    } else if (y < -32768) {
+        y = -32768;
+    }
+
+    tuner_ring[tuner_ring_pos] = (short)y;
+    tuner_ring_pos             = (tuner_ring_pos + 1u) & (TUNER_N - 1u);
+    tuner_ring_count++;
+    if (tuner_dirty)
+        tuner_dirty--;
+}
+
+#if !TUNER_SIM
+/*
+ * Opportunistic drain: take whatever the I2S FIFO holds right now and put
+ * it through the chain, without blocking.
+ *
+ * This is the yield hook the display push calls between I2C chunks, and it
+ * is what makes a continuous ring possible at all: the FIFO is 16 words,
+ * about 1 ms at 15625 Hz, against a ~25 ms framebuffer push. Without
+ * someone draining it mid-transfer the ring would take a 390-sample hole
+ * every time the screen is redrawn.
+ *
+ * An overrun here means the gap already happened, so the window is marked
+ * dirty rather than analysed.
+ */
+static void tuner_drain(void)
+{
+    int s;
+
+    while (i2s_available()) {
+        (void)i2s_read(&s);
+        tuner_push_input(s >> TUNER_IN_SHIFT);
+    }
+    if (i2s_overrun()) {
+        i2s_overrun_clear();
+        tuner_dirty = TUNER_N;
+        tuner_frame_ovr = 1;
+    }
+}
+#endif
+
+/* Block until `n` more samples have reached the ring. */
+static void tuner_pump(unsigned int n)
+{
+    unsigned int target = tuner_ring_count + n;
+
+    while (tuner_ring_count < target) {
+#if TUNER_SIM
+        tuner_push_input(tuner_mic_sample());
+#else
+        int s;
+
+        /* i2s_read_wait blocks, so this paces itself off the mic. The
+         * overrun check is per pass, not per sample: at one MMIO read per
+         * 3200 core cycles the loop cannot fall behind on its own, so a
+         * flag here means something else stole the CPU. */
+        (void)i2s_read_wait(&s);
+        tuner_push_input(s >> TUNER_IN_SHIFT);
+        if (i2s_overrun()) {
+            i2s_overrun_clear();
+            tuner_dirty     = TUNER_N;
+            tuner_frame_ovr = 1;
+        }
+#endif
+    }
+}
+
+/*
+ * Copy the ring into the coprocessor's buffer, oldest sample first, with
+ * the analysis window applied.
  *
  * Window is triangular. It costs ~26 dB of sidelobe against a rectangle
  * and needs no table -- Hann would need 1024 Q15 entries or a cosine this
  * build has no way to compute.
  *
- * DECIMATION. The mic runs at TUNER_FS_IN_HZ and a second-order CIC
- * drops it by TUNER_DECIM to the analysis rate. A CIC of order N and
- * rate R is N integrators at the fast rate, a downsample, and N combs at
- * the slow rate -- no multipliers, no coefficients, and its nulls land
- * exactly on the multiples of the output rate, which is precisely where
- * everything that aliases to DC comes from. Order 2 buys about 30 dB at
- * the worst fold against 15 dB for a plain boxcar, for one more adder.
- *
- * The integrators are allowed to wrap. That is not sloppiness: a CIC is
- * correct under two's-complement wrapping as long as the accumulator is
- * wide enough for the filter's own gain (R^order = 64 here against
- * 12-bit inputs, so 19 bits -- a 32-bit int has room to spare), because
- * the comb stage subtracts the wrap back out. The transient at the start
- * of each frame is two output samples long and lands where the window is
- * zero anyway.
- *
- * On the board the sample clock is the I2S stream itself -- the mic is
- * clocked by this peripheral and answers on its own schedule, so reading
- * the FIFO paces the loop and there is no mcycle busy-wait left. The FIFO
- * is flushed first, so the frame is contiguous even though the previous
- * frame's display push (1 KiB over I2C at 400 kHz, ~25 ms) overran it.
- * The display push is deliberately NOT done here for that reason.
+ * All TUNER_N samples go out every hop; see the note at TUNER_HOP for why
+ * the untouched 768 cannot simply be left in place.
  */
-static void tuner_acquire(void)
+static void tuner_fill_fft(void)
 {
-    unsigned int i, d;
-    int          mean;
-    int          sum = 0;
-    /* CIC state: two integrators, two comb delays. */
-    int          i1 = 0, i2 = 0, d1 = 0, d2 = 0;
-
-#if !TUNER_SIM
-    /* Start the frame on a fresh sample: whatever queued up during the
-     * previous frame's display push is stale by up to 25 ms, and a frame
-     * stitched across that gap is a frame with a step in it. */
-    i2s_flush();
-#endif
-
-#if !TUNER_SIM
-    tuner_raw_min = 32767;
-    tuner_raw_max = -32768;
-#endif
+    unsigned int i;
 
     for (i = 0; i < TUNER_N; i++) {
-        int s, c1, c2;
-
-        for (d = 0; d < tuner_decim; d++) {
-            int raw = tuner_mic_sample();
-#if !TUNER_SIM
-            if (raw < tuner_raw_min) {
-                tuner_raw_min = raw;
-            }
-            if (raw > tuner_raw_max) {
-                tuner_raw_max = raw;
-            }
-#endif
-            i1 += raw;
-            i2 += i1;
-        }
-
-        c1 = i2 - d1;
-        d1 = i2;
-        c2 = c1 - d2;
-        d2 = c1;
-
-        /* Divide out the CIC's gain, R^order, back to the input's own
-         * scale. An arithmetic shift, so it rounds toward -inf; the bias
-         * is half an LSB of a 12-bit code and the DC removal below eats
-         * it whole. At R = 1 the shift is 0 and the whole structure
-         * collapses to an identity, which is what lets the pitch cases
-         * bypass it. */
-        s = c2 >> tuner_cic_shift;
-
-        sum += s;
-        fft_write_real(i, s);
-    }
-
-#if !TUNER_SIM
-    /* The flag as of HERE: the flush above cleared whatever the previous
-     * frame's display push produced, so anything set now happened while
-     * this frame was being read -- the only case that corrupts a
-     * spectrum. */
-    tuner_frame_ovr = i2s_overrun();
-#endif
-
-    mean = sum / (int)TUNER_N;
-
-    for (i = 0; i < TUNER_N; i++) {
-        int          s = fft_read_re(i) - mean;
+        int          s = tuner_ring[(tuner_ring_pos + i) & (TUNER_N - 1u)];
         unsigned int t = (i < TUNER_N / 2u) ? i : (TUNER_N - 1u - i);
         /* Triangular window in Q15: 0 at the ends, ~1 in the middle. */
         int          w = (int)((t * 2u * 32768u) / TUNER_N);
+
         if (w > 32767) {
             w = 32767;
         }
@@ -740,14 +872,23 @@ static void tuner_analyse(tuner_result_t *r)
 /* ---------------------------------------------------------------- */
 #if !TUNER_SIM
 
-/* Gauge geometry. The needle spans +/-TUNER_GAUGE_SPAN cents across
- * +/-TUNER_GAUGE_HALF pixels either side of centre. */
+/*
+ * Gauge geometry. The needle spans +/-TUNER_GAUGE_SPAN cents across
+ * +/-TUNER_GAUGE_HALF pixels either side of centre.
+ *
+ * TOP and BOT are ALIGNED TO PAGE BOUNDARIES on purpose: rows 32..47 are
+ * exactly pages 4 and 5, so a needle that moves dirties two pages and the
+ * animation below pushes 256 bytes instead of 512. The SSD1306 addresses
+ * memory in 8-row pages whatever the drawing code thinks, so a gauge that
+ * straddles a page edge costs an extra page per redraw for nothing. Rows
+ * 30..48 -- the obvious choice, and what this was -- touched four.
+ */
 #define TUNER_GAUGE_CX    64
 #define TUNER_GAUGE_HALF  56
 #define TUNER_GAUGE_SPAN  50
 #define TUNER_GAUGE_AXIS  39
-#define TUNER_GAUGE_TOP   30
-#define TUNER_GAUGE_BOT   48
+#define TUNER_GAUGE_TOP   32
+#define TUNER_GAUGE_BOT   47
 
 static int tuner_gauge_x(int cents)
 {
@@ -821,8 +962,14 @@ static void tuner_banner(unsigned int y, const char *s, int inverted)
  * reading -- parking it at centre would be indistinguishable from a
  * perfectly tuned string.
  */
-static void tuner_render(const tuner_result_t *r, int held)
+static void tuner_render(const tuner_result_t *r, int held, int needle_cents)
 {
+    /* Drawing a full framebuffer is ~0.6 ms of memset and blitting with no
+     * I2C in it, so nothing else would service the mic during it. The FIFO
+     * holds 1.02 ms: the margin is real but thin, and one drain here costs
+     * nothing. */
+    tuner_drain();
+
     ssd1306_clear();
 
     if (!r->valid) {
@@ -857,7 +1004,10 @@ static void tuner_render(const tuner_result_t *r, int held)
     }
 
     tuner_draw_scale();
-    tuner_draw_needle(r->cents);
+    /* The NUMBERS are the reading; only the NEEDLE is animated. Animating
+     * the printed cents too would be inventing measurements that were
+     * never taken. */
+    tuner_draw_needle(needle_cents);
 
     if (r->cents > TUNER_IN_TUNE_CENTS) {
         tuner_banner(54u, "SHARP", 0);
@@ -866,14 +1016,102 @@ static void tuner_render(const tuner_result_t *r, int held)
     } else {
         tuner_banner(54u, "IN TUNE", 1);
     }
+}
 
-    ssd1306_update();
+/*
+ * Push what actually changed, one page at a time, yielding to the mic.
+ *
+ * Two mechanisms, and they solve different halves of the same problem.
+ * The PAGE HASH stops unchanged rows from being sent at all -- the scale,
+ * the tick marks and a note name that has not moved are pushed once and
+ * then never again, so a typical hop sends one or two pages instead of
+ * eight. The CHUNKING inside ssd1306_update_page() bounds how long any
+ * single transfer holds the CPU, which is what keeps the sample ring
+ * contiguous: 24 bytes at 400 kHz is ~600 us against a FIFO that fills in
+ * 1.02 ms.
+ *
+ * A 16-bit hash can in principle collide and leave a page stale. It is
+ * worth the 16 bytes of state rather than a 1 KiB shadow framebuffer in a
+ * 8 KiB D-mem, and any stale page is corrected by the next change to it.
+ */
+/*
+ * One animation step: move a third of the way to the target, but never
+ * less than one pixel-worth of cents, so it always converges instead of
+ * creeping asymptotically forever.
+ */
+static int tuner_anim_step(int cur, int target)
+{
+    int d = target - cur;
+    int s;
+
+    if (d == 0) {
+        return cur;
+    }
+    s = d / 3;
+    if (s == 0) {
+        s = (d > 0) ? 1 : -1;
+    }
+    return cur + s;
+}
+
+#define TUNER_PAGES (SSD1306_HEIGHT / 8u)
+
+static unsigned short tuner_page_hash[TUNER_PAGES];
+static int            tuner_page_primed;
+
+static void tuner_flush_display(void)
+{
+    unsigned int p, i;
+
+    /* Same reason as in tuner_render(): the hash pass walks 1 KiB before
+     * the first I2C chunk gets a chance to yield. */
+    tuner_drain();
+
+    for (p = 0; p < TUNER_PAGES; p++) {
+        const unsigned char *row = &ssd1306_fb[p * SSD1306_WIDTH];
+        unsigned short       h   = 0u;
+
+        for (i = 0; i < SSD1306_WIDTH; i++) {
+            h = (unsigned short)(h * 31u + row[i]);
+        }
+        if (!tuner_page_primed || h != tuner_page_hash[p]) {
+            ssd1306_update_page(p);
+            tuner_page_hash[p] = h;
+        }
+    }
+    tuner_page_primed = 1;
 }
 #endif /* !TUNER_SIM */
 
 /* ---------------------------------------------------------------- */
 /* UART reporting (both builds -- the board one is a debug console)   */
 /* ---------------------------------------------------------------- */
+
+/*
+ * Console output, draining the mic FIFO as it goes.
+ *
+ * A report line is ~40 characters, which at 115200 baud is 3.5 ms -- three
+ * times the 16-word FIFO. On the board that is as damaging to a continuous
+ * ring as the display push is, so the same yield applies: one drain per
+ * character costs nothing and bounds the gap at one character time.
+ */
+#if !TUNER_SIM
+static void tuner_putc(char c)
+{
+    tuner_drain();
+    uart_putc(c);
+}
+
+static void tuner_puts(const char *str)
+{
+    while (*str) {
+        tuner_putc(*str++);
+    }
+}
+#else
+#define tuner_putc uart_putc
+#define tuner_puts uart_puts
+#endif
 
 static void tuner_put_uint(unsigned int v)
 {
@@ -885,14 +1123,14 @@ static void tuner_put_uint(unsigned int v)
         v /= 10u;
     } while (v && n < sizeof(buf));
     while (n--) {
-        uart_putc(buf[n]);
+        tuner_putc(buf[n]);
     }
 }
 
 static void tuner_put_int(int v)
 {
     if (v < 0) {
-        uart_putc('-');
+        tuner_putc('-');
         v = -v;
     }
     tuner_put_uint((unsigned int)v);
@@ -902,43 +1140,43 @@ static void tuner_put_int(int v)
 static void tuner_put_chz(unsigned int v)
 {
     tuner_put_uint(v / 100u);
-    uart_putc('.');
-    uart_putc((char)('0' + (v / 10u) % 10u));
-    uart_putc((char)('0' + v % 10u));
+    tuner_putc('.');
+    tuner_putc((char)('0' + (v / 10u) % 10u));
+    tuner_putc((char)('0' + v % 10u));
 }
 
 static void tuner_report(const tuner_result_t *r, int held)
 {
     if (held) {
-        uart_puts("(held) ");
+        tuner_puts("(held) ");
     }
     if (!r->valid) {
-        uart_puts("-- no signal (peak ");
+        tuner_puts("-- no signal (peak ");
         tuner_put_uint(r->peak);
 #if !TUNER_SIM
         /* The raw mic swing is what says WHICH kind of no-signal this is
          * (see tuner_raw_min/max above). */
-        uart_puts(", raw ");
+        tuner_puts(", raw ");
         tuner_put_int(tuner_raw_min);
-        uart_puts("..");
+        tuner_puts("..");
         tuner_put_int(tuner_raw_max);
-        uart_puts(", floor ");
+        tuner_puts(", floor ");
         tuner_put_uint(tuner_floor);
 #endif
-        uart_puts(")\r\n");
+        tuner_puts(")\r\n");
         return;
     }
-    uart_puts(tuner_notes[r->note].name);
-    uart_puts("  ");
+    tuner_puts(tuner_notes[r->note].name);
+    tuner_puts("  ");
     tuner_put_chz(r->f_cHz);
-    uart_puts(" Hz  ");
+    tuner_puts(" Hz  ");
     if (r->cents >= 0) {
-        uart_putc('+');
+        tuner_putc('+');
     }
     tuner_put_int(r->cents);
-    uart_puts(" cents  peak ");
+    tuner_puts(" cents  peak ");
     tuner_put_uint(r->peak);
-    uart_puts("\r\n");
+    tuner_puts("\r\n");
 }
 
 /* ---------------------------------------------------------------- */
@@ -987,7 +1225,11 @@ static volatile unsigned int *const tuner_result = (volatile unsigned int *)0x30
 static int tuner_run_frame(unsigned int f_cHz, int pure, tuner_result_t *r)
 {
     tuner_sim_set(f_cHz, tuner_decim, pure);
-    tuner_acquire();
+    /* A whole window per case: the oscillator changes frequency between
+     * cases, so overlapping them would mix two tones in one window. The
+     * board path hops by TUNER_HOP instead. */
+    tuner_pump(TUNER_N);
+    tuner_fill_fft();
     fft_start();
     if (!fft_wait()) {
         uart_puts("FFT never finished\r\n");
@@ -1111,6 +1353,48 @@ static unsigned int tuner_check_i2s(void)
         unsigned int lo = want - want / 16u, hi = want + want / 16u;
         if (dt < lo || dt > hi) {
             uart_puts("   ^ not the designed frame period\r\n");
+            fails++;
+        }
+    }
+
+    /*
+     * CPU budget per hop, measured rather than assumed.
+     *
+     * The overlapped loop has to rewrite the whole window into the
+     * coprocessor and read the spectrum back once every TUNER_HOP samples.
+     * Both are MMIO loops over a 4 KiB window, so they are the biggest
+     * fixed cost in the loop and the one that would quietly cap the hop
+     * rate if it grew. One decimated sample is
+     * TUNER_CORE_HZ*TUNER_DECIM/TUNER_FS_IN_HZ = 25600 core cycles, so a
+     * 256-sample hop is 6.55 M cycles and this should not be close.
+     */
+    {
+        unsigned int t0, fill_cyc, read_cyc, budget;
+
+        t0 = sys_cycle();
+        tuner_fill_fft();
+        fill_cyc = sys_cycle() - t0;
+
+        t0 = sys_cycle();
+        tuner_read_spectrum();
+        read_cyc = sys_cycle() - t0;
+
+        budget = TUNER_HOP * (TUNER_CORE_HZ * TUNER_DECIM / TUNER_FS_IN_HZ);
+
+        uart_puts("hop cost ");
+        tuner_put_uint(fill_cyc + read_cyc);
+        uart_puts(" cycles (fill ");
+        tuner_put_uint(fill_cyc);
+        uart_puts(" + read ");
+        tuner_put_uint(read_cyc);
+        uart_puts("), budget ");
+        tuner_put_uint(budget);
+        uart_puts("\r\n");
+
+        /* A quarter of the budget is already a design smell, not a limit
+         * anyone should be near. */
+        if (fill_cyc + read_cyc > budget / 4u) {
+            uart_puts("   ^ MMIO cost is a quarter of the hop\r\n");
             fails++;
         }
     }
@@ -1274,8 +1558,14 @@ static void tuner_mic_probe(void)
 int main(void)
 {
     tuner_result_t r;
-    tuner_result_t last;          /* last reading with a real signal */
-    unsigned int   hold = 0u;     /* frames left to keep showing it */
+    tuner_result_t last;             /* last reading with a real signal */
+    unsigned int   hold = 0u;        /* hops left to keep showing it */
+    unsigned int   since_report = 0u;
+    int            last_state = -1;  /* valid/held combination last printed */
+    int            last_note = -1;
+    int            anim_cents = 0;   /* where the needle is drawn now */
+    int            target_cents = 0; /* where the last reading says it goes */
+    int            showing = 0;      /* a needle is on screen at all */
 
     last.valid = 0;
 
@@ -1300,6 +1590,21 @@ int main(void)
     i2s_begin(I2S_WLEN_24, I2S_CHAN_LEFT, I2S_FMT_I2S);
     tuner_mic_probe();
 
+    /* Which build is on the board, in one line. "Is the display slower
+     * than I think" is otherwise unanswerable from the outside: window and
+     * hop are the two numbers that decide it, and they are not visible in
+     * the picture -- consecutive readings share 75% of their window, so a
+     * faster update looks a lot like no change at all. */
+    uart_puts("window ");
+    tuner_put_uint(TUNER_N);
+    uart_puts(" samples (");
+    tuner_put_uint((TUNER_N * 1000u) / (TUNER_FS_IN_HZ / TUNER_DECIM));
+    uart_puts(" ms), hop ");
+    tuner_put_uint(TUNER_HOP);
+    uart_puts(" (");
+    tuner_put_uint((TUNER_HOP * 1000u) / (TUNER_FS_IN_HZ / TUNER_DECIM));
+    uart_puts(" ms per update)\r\n");
+
     i2c_begin_hz(TUNER_I2C_HZ);
 
     if (ssd1306_begin(SSD1306_ADDR) != I2C_OK) {
@@ -1310,38 +1615,72 @@ int main(void)
     tuner_banner(36u, "E A D G B E", 0);
     ssd1306_update();
 
+    /* From here on every display push is paged, chunked and yields to the
+     * mic: the ring must not take a 25 ms hole every time the screen
+     * changes. The splash above is pushed before the stream starts, so it
+     * can still go out in one transaction. */
+    ssd1306_yield_fn = tuner_drain;
+
     fft_begin(TUNER_LOG2N);
 
-    /* Prime the ping-pong: one frame goes to the engine before the loop,
-     * so that from then on every acquisition overlaps a transform. Here
-     * that overlap is nearly free -- acquiring 1024 samples at 2 kHz is
-     * 512 ms against ~103 us of FFT -- but the structure is the one the
-     * peripheral is built for and costs nothing to keep. */
-    tuner_acquire();
+    /*
+     * Overlapped analysis. The window is TUNER_N long and slides by
+     * TUNER_HOP, so a new reading lands every 131 ms while each one still
+     * sees 524 ms of signal -- see the note at TUNER_HOP for what that
+     * does and does not buy.
+     *
+     * Order inside the loop is fixed by the ping-pong: fft_start() hands
+     * the engine the buffer just filled AND hands back the one holding the
+     * previous result, so it must come between filling and reading. The
+     * displayed reading is therefore one hop (131 ms) old.
+     */
+    tuner_pump(TUNER_N); /* prime: one full window before the first launch */
+    tuner_fill_fft();
     fft_start();
 
     for (;;) {
-        tuner_acquire();
+        unsigned int step;
+
+        tuner_raw_min = 32767;
+        tuner_raw_max = -32768;
+
+        /*
+         * One hop, in TUNER_ANIM_STEPS slices, with the needle stepping
+         * toward its target between them. The samples keep arriving
+         * through tuner_pump() exactly as before -- the animation rides on
+         * the waiting time that already existed, it does not add any.
+         */
+        for (step = 0; step < TUNER_ANIM_STEPS; step++) {
+            tuner_pump(TUNER_HOP / TUNER_ANIM_STEPS);
+
+            if (showing && anim_cents != target_cents) {
+                anim_cents = tuner_anim_step(anim_cents, target_cents);
+                tuner_render(showing == 2 ? &last : &r, showing == 2, anim_cents);
+                tuner_flush_display();
+            }
+        }
+
         if (!fft_wait()) {
-            uart_puts("FFT stalled\r\n");
+            tuner_puts("FFT stalled\r\n");
             continue;
         }
+        tuner_fill_fft();
         fft_start();
 
-        /* Only an overrun DURING the frame means anything: the samples
-         * that pile up during the display push and this report are
-         * discarded on purpose by the flush at the top of
-         * tuner_acquire(), and frames are independent, so losing the gap
-         * between them costs nothing.
-         *
-         * Reading the live flag HERE instead -- which is what this loop
-         * did until 2026-09-16 -- reports an overrun on every single
-         * iteration, because the 25 ms display push always overruns a
-         * 1 ms FIFO. tuner_acquire() captures the flag at the end of the
-         * frame, which is the only moment at which it is a fault. */
+        /*
+         * An overrun is now always a fault, which it was not when frames
+         * were independent: a gap is a step in the MIDDLE of the sliding
+         * window, so it smears the spectrum instead of merely separating
+         * two clean frames. tuner_drain()/tuner_pump() mark the window
+         * dirty when they see one, and nothing is analysed until a whole
+         * window of clean samples has replaced it.
+         */
         if (tuner_frame_ovr) {
-            uart_puts("!! I2S overrun DURING acquisition -- spectrum is "
-                      "not contiguous\r\n");
+            tuner_frame_ovr = 0;
+            tuner_puts("!! I2S overrun -- window discarded\r\n");
+        }
+        if (tuner_dirty) {
+            continue;
         }
 
         tuner_analyse(&r);
@@ -1351,24 +1690,49 @@ int main(void)
          * hold counter and lowers the floor, so a decaying string keeps
          * its note while the peg is being turned; once even the release
          * threshold is gone the last reading stays on the gauge for
-         * TUNER_HOLD_FRAMES (about 3 seconds) before the display admits
-         * there is nothing there.
+         * TUNER_HOLD_FRAMES hops (about 3 seconds) before the display
+         * admits there is nothing there.
          */
         if (r.valid) {
-            last        = r;
-            hold        = TUNER_HOLD_FRAMES;
-            tuner_floor = TUNER_FLOOR_HOLD;
-            tuner_render(&r, 0);
-            tuner_report(&r, 0);
+            last         = r;
+            hold         = TUNER_HOLD_FRAMES;
+            tuner_floor  = TUNER_FLOOR_HOLD;
+            target_cents = r.cents;
+            /* First reading after silence: place the needle instead of
+             * sweeping it in from wherever the last note left it. */
+            if (!showing) {
+                anim_cents = r.cents;
+            }
+            showing = 1;
+            tuner_render(&r, 0, anim_cents);
         } else if (hold > 0u) {
             hold--;
-            tuner_render(&last, 1);
-            tuner_report(&last, 1);
+            target_cents = last.cents;
+            showing      = 2;
+            tuner_render(&last, 1, anim_cents);
         } else {
             tuner_floor = TUNER_FLOOR_ATTACK;
-            tuner_render(&r, 0);
-            tuner_report(&r, 0);
+            showing     = 0;
+            tuner_render(&r, 0, anim_cents);
         }
+
+        /* Report on change, then on a timer (see TUNER_REPORT_HOPS). The
+         * display is the live instrument; the console is the log. */
+        {
+            const tuner_result_t *shown = r.valid ? &r : (hold > 0u ? &last : &r);
+            int                   held  = (!r.valid && hold > 0u);
+            int                   state = (shown->valid ? 1 : 0) | (held ? 2 : 0);
+
+            if (state != last_state || shown->note != last_note ||
+                ++since_report >= TUNER_REPORT_HOPS) {
+                tuner_report(shown, held);
+                since_report = 0u;
+                last_state   = state;
+                last_note    = shown->note;
+            }
+        }
+
+        tuner_flush_display();
     }
 }
 

@@ -54,10 +54,76 @@ static void ssd1306_cmds(const unsigned char *c, unsigned int n)
     i2c_write_regs(ssd1306_addr, SSD1306_CTRL_CMD, c, n);
 }
 
-/* Push the whole framebuffer in one transaction. */
+/*
+ * Optional cooperative yield, called between the I2C chunks of a paged
+ * update (ssd1306_update_page). Null by default.
+ *
+ * It exists because a display push is LONG next to a real-time input: the
+ * full framebuffer is 1 KiB, which at 400 kHz is about 25 ms, and anything
+ * feeding a small hardware FIFO (an I2S receiver, say) loses samples for
+ * the whole of it. Chunking the transfer and draining that FIFO between
+ * chunks is what keeps an audio stream contiguous while the screen is
+ * being written.
+ */
+static void (*ssd1306_yield_fn)(void);
+
+/* Bytes per I2C transaction in a paged update. 24 bytes is about 600 us at
+ * 400 kHz including the address and control byte, which leaves margin
+ * against a 16-entry FIFO at 15625 Hz (1.02 ms). Raise it if nothing needs
+ * servicing, lower it if something does so more often. */
+#ifndef SSD1306_CHUNK
+#define SSD1306_CHUNK 24u
+#endif
+
+/* Push the whole framebuffer in one transaction.
+ *
+ * Sets the address window itself rather than relying on the one
+ * ssd1306_begin() left behind -- ssd1306_update_page() narrows that window
+ * to a single page, so a full update after a paged one would otherwise
+ * write 1 KiB into one page's worth of address space. */
 static void ssd1306_update(void)
 {
+    ssd1306_cmd(0x21); /* column range 0..WIDTH-1 */
+    ssd1306_cmd(0x00);
+    ssd1306_cmd(SSD1306_WIDTH - 1u);
+    ssd1306_cmd(0x22); /* page range 0..PAGES-1 */
+    ssd1306_cmd(0x00);
+    ssd1306_cmd((SSD1306_HEIGHT / 8u) - 1u);
     i2c_write_regs(ssd1306_addr, SSD1306_CTRL_DAT, ssd1306_fb, SSD1306_FB_SIZE);
+}
+
+/*
+ * Push ONE page (8 pixel rows, WIDTH bytes) in SSD1306_CHUNK-sized
+ * transactions, calling ssd1306_yield_fn between them.
+ *
+ * Two things this buys over ssd1306_update(): only what changed goes out
+ * (a caller that tracks dirty pages pushes 128 bytes instead of 1024), and
+ * the transfer is interruptible at chunk granularity. Horizontal
+ * addressing auto-increments across transactions, so the chunks need no
+ * per-chunk addressing.
+ */
+static void ssd1306_update_page(unsigned int page)
+{
+    const unsigned char *p = &ssd1306_fb[page * SSD1306_WIDTH];
+    unsigned int off = 0u;
+
+    ssd1306_cmd(0x21);
+    ssd1306_cmd(0x00);
+    ssd1306_cmd(SSD1306_WIDTH - 1u);
+    ssd1306_cmd(0x22);
+    ssd1306_cmd((unsigned char)page);
+    ssd1306_cmd((unsigned char)page);
+
+    while (off < SSD1306_WIDTH) {
+        unsigned int n = SSD1306_WIDTH - off;
+
+        if (n > SSD1306_CHUNK)
+            n = SSD1306_CHUNK;
+        i2c_write_regs(ssd1306_addr, SSD1306_CTRL_DAT, p + off, n);
+        off += n;
+        if (ssd1306_yield_fn)
+            ssd1306_yield_fn();
+    }
 }
 
 /* ------------------------------------------------------------------ */

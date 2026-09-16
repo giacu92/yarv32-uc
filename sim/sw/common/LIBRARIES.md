@@ -452,6 +452,25 @@ page-major; `update()` sends it as one I2C transaction. Commands and
 data are distinguished by the control byte (0x00/0x40), which rides in
 the "register" position of `i2c_write_regs`.
 
+**If the program has a real-time input, do not use `update()` in the
+loop.** A full push is ~25 ms at 400 kHz, and anything feeding a small
+hardware FIFO loses samples for the whole of it — an I2S receiver with 16
+words holds 1 ms. Use `ssd1306_update_page(p)` instead: it sends one page
+in `SSD1306_CHUNK`-byte transactions (24 bytes, ~600 µs) and calls
+`ssd1306_yield_fn` between them, which is where you drain that FIFO.
+
+```c
+ssd1306_yield_fn = my_drain;      /* called between chunks */
+for (p = 0; p < 8; p++)
+    if (page_changed(p))          /* e.g. a 16-bit hash per page */
+        ssd1306_update_page(p);
+```
+
+Two separate wins: chunking bounds how long any single transfer holds the
+CPU, and pushing only changed pages means static furniture goes out once
+(`sim/sw/guitar_tuner` does both). `update()` and `update_page()` can be
+mixed freely — each sets its own address window.
+
 ### ds3231.h — RTC
 
 ```c

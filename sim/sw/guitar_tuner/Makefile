@@ -37,12 +37,18 @@ include ../common/sw_build.mk
 
 # The default target builds BOTH images: the board one in build/ and the
 # self-check in build-sim/, so `make -C sim/sw` and `make regress` need no
-# special case. The guard is what stops the recursion -- the sub-make runs
-# with BUILD=build-sim on its command line, and there `all` must not pull
-# `sim` in again.
+# special case, and `clean` removes both.
+#
+# BOTH hooks have to sit inside the guard, and the second one was missing
+# until 2026-09-16: the sub-make runs with BUILD=build-sim on its command
+# line, so an unguarded `clean: clean-sim` re-entered `make BUILD=build-sim
+# clean` from inside itself and recursed until make gave up. `all: sim` had
+# the guard from the start, which is exactly why the omission on `clean`
+# was easy to miss.
 .PHONY: sim clean-sim
 ifneq ($(BUILD),build-sim)
 all: sim
+clean: clean-sim
 endif
 
 sim:
@@ -50,5 +56,3 @@ sim:
 
 clean-sim:
 	$(MAKE) BUILD=build-sim clean
-
-clean: clean-sim

@@ -567,14 +567,15 @@ exits non-zero. A test harness that has never failed has not been tested.
   number and the IRQ debug fields stay in `.data`.
 - **`sw/guitar_tuner/`** — a guitar tuner, and the FFT coprocessor's first
   real application: INMP441 I2S microphone at 15625 Hz → 2nd-order CIC
-  decimation by 8 → windowed 1024-point transform at 1953.125 Hz →
+  decimation by 8 → a 1024-sample ring re-transformed every 256 samples
+  (131 ms, 75% overlap) at 1953.125 Hz →
   fundamental pick → parabolic interpolation → nearest chromatic note and
   cents → SSD1306 needle gauge. The I2S peripheral runs in **master mode**
   here, because an INMP441 is itself a clock slave and nothing else on the
   board generates an audio clock. Neither device is modelled here, so the
   harness builds
   **twice**: `build/` is the board image, and `build-sim/`
-  (`-DTUNER_SIM=1`) swaps the ADC for a synthetic oscillator and the
+  (`-DTUNER_SIM=1`) swaps the mic for a synthetic oscillator and the
   display for the UART. It then checks three things.
   *Pitch*: nine known frequencies — exact notes and deliberate
   ±10/20/30/35-cent offsets — plus silence, which must read as silence

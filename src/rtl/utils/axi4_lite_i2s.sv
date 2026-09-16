@@ -430,19 +430,46 @@ module axi4_lite_i2s #(
     // entirely and the word silently loses bits, which no functional check
     // in a testbench would attribute to the clock ratio. Counted on both
     // edges, saturating.
+    //
+    // The check is SUSPENDED around a change of CTRL.MASTER. Handing the
+    // bus over swaps which device drives BCLK, and the two are unrelated:
+    // the outgoing driver can leave the line high in the same cycle the
+    // incoming one starts it low, which is a discontinuity, not a rate
+    // violation. The receiver itself does not care -- it resynchronizes at
+    // the next WS transition, costing at most one word -- so flagging it
+    // would be crying wolf at the one moment the design expects a glitch.
+    // Real hardware sees exactly the same transient, with the pad's
+    // tri-state hand-over on top.
+    //
     logic [7:0] bclk_gap_q;
-    wire bclk_edge = (bclk_q != i2s_bclk_i);
+    logic [2:0] bclk_hold_q;
+    logic       master_prev_q;
+    wire        bclk_edge = (bclk_q != i2s_bclk_i);
 
     always_ff @(posedge clk_i) begin
         if (!rstn_i) begin
-            bclk_gap_q <= 8'hFF;
-        end else if (bclk_edge) begin
-            if (bclk_gap_q < 8'd2) begin
-                $error("axi4_lite_i2s: BCLK half-period %0d core cycles, need >= 2", bclk_gap_q);
+            bclk_gap_q    <= 8'hFF;
+            bclk_hold_q   <= '0;
+            master_prev_q <= 1'b0;
+        end else begin
+            master_prev_q <= master_q;
+
+            if (master_q != master_prev_q) begin
+                // Hand-over: forget the history and skip the next few
+                // edges entirely.
+                bclk_hold_q <= 3'd4;
+                bclk_gap_q  <= 8'hFF;
+            end else if (bclk_edge) begin
+                if (bclk_hold_q != 3'd0) begin
+                    bclk_hold_q <= bclk_hold_q - 3'd1;
+                end else if (bclk_gap_q < 8'd2) begin
+                    $error("axi4_lite_i2s: BCLK half-period %0d core cycles, need >= 2",
+                           bclk_gap_q);
+                end
+                bclk_gap_q <= 8'd1;
+            end else if (bclk_gap_q != 8'hFF) begin
+                bclk_gap_q <= bclk_gap_q + 8'd1;
             end
-            bclk_gap_q <= 8'd1;
-        end else if (bclk_gap_q != 8'hFF) begin
-            bclk_gap_q <= bclk_gap_q + 8'd1;
         end
     end
 `endif

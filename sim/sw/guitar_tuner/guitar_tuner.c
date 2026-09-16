@@ -373,6 +373,12 @@ static void tuner_set_decim(unsigned int r)
 static int tuner_raw_min;
 static int tuner_raw_max;
 static int tuner_frame_ovr;
+/* Running total, printed with every report line. An overrun costs a whole
+ * window -- TUNER_N clean samples have to replace the gap before anything
+ * is analysed again, i.e. 4 hops = 524 ms of frozen needle -- so a counter
+ * that climbs is what separates "the estimator is jittery" from "something
+ * in the loop is starving the input". */
+static unsigned int tuner_ovr_count;
 #endif
 
 /* Result of one frame. */
@@ -478,12 +484,27 @@ static unsigned int tuner_sim_inc;
  * intermediate would be exact and would also pull __udivdi3, which is not
  * linked.
  */
-static unsigned int tuner_sim_pure;
+/*
+ * Source shape:
+ *   TUNER_SRC_RICH  fundamental plus 2nd and 3rd, the THIRD loudest -- the
+ *                   trap a largest-bin picker falls into.
+ *   TUNER_SRC_PURE  one tone, for the anti-aliasing measurement, where a
+ *                   harmonic would contaminate the magnitude ratio.
+ *   TUNER_SRC_WEAK  fundamental a fifth of the 2nd harmonic. This is not a
+ *                   hypothetical: playing an 82 Hz E2 through a small
+ *                   speaker loses ~18 dB of low end, which is exactly this
+ *                   ratio, and it made the board report E3 (2026-09-16).
+ */
+#define TUNER_SRC_RICH 0
+#define TUNER_SRC_PURE 1
+#define TUNER_SRC_WEAK 2
 
-static void tuner_sim_set(unsigned int f_cHz, unsigned int decim, int pure)
+static unsigned int tuner_sim_src;
+
+static void tuner_sim_set(unsigned int f_cHz, unsigned int decim, int src)
 {
     tuner_sim_phase = 0u;
-    tuner_sim_pure  = (unsigned int)pure;
+    tuner_sim_src   = (unsigned int)src;
 
     /* Only the two rates the self-check uses. 2^32/(1953.125*100) =
      * 21990.233 and 2^32/(15625*100) = 2748.779. */
@@ -523,8 +544,11 @@ static int tuner_mic_sample(void)
      * strongest partial, which is exactly the trap. The anti-aliasing
      * cases want one clean tone instead, so that the magnitude ratio they
      * measure is the filter's and not a harmonic's. */
-    if (tuner_sim_pure) {
+    if (tuner_sim_src == TUNER_SRC_PURE) {
         s = tuner_sin(tuner_sim_phase) >> 1;
+    } else if (tuner_sim_src == TUNER_SRC_WEAK) {
+        /* Fundamental at 1/5 of the 2nd harmonic, nothing else. */
+        s = (tuner_sin(tuner_sim_phase) >> 4) + (tuner_sin(tuner_sim_phase * 2u) >> 1);
     } else {
         s = (tuner_sin(tuner_sim_phase) >> 2) + (tuner_sin(tuner_sim_phase * 2u) >> 2) +
             (tuner_sin(tuner_sim_phase * 3u) >> 1);
@@ -640,8 +664,9 @@ static void tuner_drain(void)
     }
     if (i2s_overrun()) {
         i2s_overrun_clear();
-        tuner_dirty = TUNER_N;
+        tuner_dirty     = TUNER_N;
         tuner_frame_ovr = 1;
+        tuner_ovr_count++;
     }
 }
 #endif
@@ -667,6 +692,7 @@ static void tuner_pump(unsigned int n)
             i2s_overrun_clear();
             tuner_dirty     = TUNER_N;
             tuner_frame_ovr = 1;
+            tuner_ovr_count++;
         }
 #endif
     }
@@ -686,17 +712,29 @@ static void tuner_pump(unsigned int n)
 static void tuner_fill_fft(void)
 {
     unsigned int i;
+    unsigned int r = tuner_ring_pos;
+    int          w;
 
-    for (i = 0; i < TUNER_N; i++) {
-        int          s = tuner_ring[(tuner_ring_pos + i) & (TUNER_N - 1u)];
-        unsigned int t = (i < TUNER_N / 2u) ? i : (TUNER_N - 1u - i);
-        /* Triangular window in Q15: 0 at the ends, ~1 in the middle. */
-        int          w = (int)((t * 2u * 32768u) / TUNER_N);
-
-        if (w > 32767) {
-            w = 32767;
-        }
-        fft_write_real(i, (s * w) >> 15);
+    /*
+     * The window is walked incrementally instead of being computed per
+     * sample: a triangle over TUNER_N points steps by 2*32768/TUNER_N = 64
+     * in Q15, so the ternary, the multiply and the divide that used to sit
+     * in the loop body are all one addition. Two loops, one per slope,
+     * which also removes the per-sample branch.
+     *
+     * The ring index is carried and masked rather than recomputed from i.
+     */
+    w = 0;
+    for (i = 0; i < TUNER_N / 2u; i++) {
+        fft_write_real(i, (tuner_ring[r] * w) >> 15);
+        r = (r + 1u) & (TUNER_N - 1u);
+        w += 64;
+    }
+    w = 32768 - 64;
+    for (; i < TUNER_N; i++) {
+        fft_write_real(i, (tuner_ring[r] * (w > 32767 ? 32767 : w)) >> 15);
+        r = (r + 1u) & (TUNER_N - 1u);
+        w -= 64;
     }
 }
 
@@ -704,12 +742,42 @@ static void tuner_fill_fft(void)
 /* Analysis                                                          */
 /* ---------------------------------------------------------------- */
 
+/*
+ * Magnitudes of the bins the estimator actually looks at.
+ *
+ * Two things this does NOT do, and both were costing real cycles:
+ *
+ *   - it does not read all 512 bins. The search runs over KMIN..KMAX (70
+ *     to 420 Hz, 186 bins) and the parabolic interpolation needs one
+ *     neighbour either side, so everything outside 35..222 is read, packed
+ *     into a magnitude and then never looked at. That was 63% of the loop.
+ *   - it does not call fft_mag(), which reads the SAME MMIO word twice
+ *     (once through fft_read_re and once through fft_read_im). One load
+ *     carries both halves; splitting it doubled the bus traffic of the
+ *     whole pass.
+ *
+ * Together: 1024 MMIO loads down to 188. The bins outside the range keep
+ * whatever was in the array; nothing reads them.
+ */
+#define TUNER_KLO (TUNER_KMIN - 1u)
+#define TUNER_KHI (TUNER_KMAX + 1u)
+
 static void tuner_read_spectrum(void)
 {
     unsigned int k;
 
-    for (k = 0; k < TUNER_N / 2u; k++) {
-        tuner_mag[k] = (unsigned short)fft_mag(k);
+    for (k = TUNER_KLO; k <= TUNER_KHI; k++) {
+        int re, im;
+        unsigned int a, b, hi, lo;
+
+        fft_read(k, &re, &im); /* one word: {imag, real} */
+        a  = (unsigned int)(re < 0 ? -re : re);
+        b  = (unsigned int)(im < 0 ? -im : im);
+        hi = a > b ? a : b;
+        lo = a > b ? b : a;
+
+        /* Same sqrt-free approximation as fft_mag(): max + 3*min/8. */
+        tuner_mag[k] = (unsigned short)(hi + (3u * lo) / 8u);
     }
 }
 
@@ -732,6 +800,27 @@ static void tuner_read_spectrum(void)
  */
 #define TUNER_SNR_RATIO 4u
 
+/*
+ * Sub-harmonic rescue, for when the fundamental is weak rather than absent.
+ *
+ * The scan above accepts the lowest partial that reaches 1/TUNER_PEAK_
+ * FRACTION of the strongest one. A fundamental quieter than that is
+ * skipped and the answer comes out an octave high -- which is exactly what
+ * happens when the signal arrives through something that cannot reproduce
+ * the low end. A small speaker playing an 82 Hz E2 loses about 18 dB down
+ * there, which puts the fundamental at a fifth of the 2nd harmonic: right
+ * on the threshold, so the reading flips between E2 and E3 frame by frame.
+ * (Measured on the board, 2026-09-16.)
+ *
+ * So after choosing a bin, look once at half of it. Taking it requires
+ * a local maximum, 1/TUNER_SUB_FRACTION of the strongest bin -- a much
+ * lower bar -- AND the same signal-to-noise margin the detection itself
+ * uses, which is what stops a noise bump an octave down from being
+ * promoted to the answer. One level only: two would be inviting the
+ * octave-down error this is meant to avoid.
+ */
+#define TUNER_SUB_FRACTION 10u
+
 static int tuner_find_fundamental(unsigned int *peak_out)
 {
     unsigned int k, best = TUNER_KMIN, bestm = 0u, thr;
@@ -752,15 +841,48 @@ static int tuner_find_fundamental(unsigned int *peak_out)
         return -1;
     }
 
-    thr = bestm / TUNER_PEAK_FRACTION;
+    thr  = bestm / TUNER_PEAK_FRACTION;
+    best = TUNER_KMAX + 1u; /* "nothing found by the scan" */
     for (k = TUNER_KMIN + 1u; k < TUNER_KMAX; k++) {
         if (tuner_mag[k] >= thr && tuner_mag[k] > tuner_mag[k - 1u] &&
             tuner_mag[k] >= tuner_mag[k + 1u]) {
-            *peak_out = tuner_mag[k];
-            return (int)k;
+            best = k;
+            break;
+        }
+    }
+    if (best > TUNER_KMAX) {
+        /* No local maximum cleared the bar: fall back to the strongest
+         * bin, which is what the search started from. */
+        for (k = TUNER_KMIN, bestm = 0u; k <= TUNER_KMAX; k++) {
+            if (tuner_mag[k] > bestm) {
+                bestm = tuner_mag[k];
+                best  = k;
+            }
+        }
+        *peak_out = bestm;
+        return (int)best;
+    }
+
+    /* Sub-harmonic rescue (see TUNER_SUB_FRACTION). The harmonic's bin is
+     * not exactly twice the fundamental's once rounding is involved, so
+     * look at the neighbours of best/2 as well. */
+    if (best / 2u > TUNER_KMIN) {
+        unsigned int h   = best / 2u;
+        unsigned int sub = bestm / TUNER_SUB_FRACTION;
+
+        for (k = h - 1u; k <= h + 1u; k++) {
+            if (k <= TUNER_KMIN || k >= TUNER_KMAX) {
+                continue;
+            }
+            if (tuner_mag[k] >= sub && tuner_mag[k] > TUNER_SNR_RATIO * mean &&
+                tuner_mag[k] > tuner_mag[k - 1u] && tuner_mag[k] >= tuner_mag[k + 1u]) {
+                *peak_out = tuner_mag[k];
+                return (int)k;
+            }
         }
     }
 
+    *peak_out = tuner_mag[best];
     return (int)best;
 }
 
@@ -1176,6 +1298,12 @@ static void tuner_report(const tuner_result_t *r, int held)
     tuner_put_int(r->cents);
     tuner_puts(" cents  peak ");
     tuner_put_uint(r->peak);
+#if !TUNER_SIM
+    if (tuner_ovr_count) {
+        tuner_puts("  OVR ");
+        tuner_put_uint(tuner_ovr_count);
+    }
+#endif
     tuner_puts("\r\n");
 }
 
@@ -1222,9 +1350,9 @@ static volatile unsigned int *const tuner_result = (volatile unsigned int *)0x30
 
 /* One frame end to end: drive the oscillator, acquire, transform,
  * analyse. Returns 0 if the engine never finished. */
-static int tuner_run_frame(unsigned int f_cHz, int pure, tuner_result_t *r)
+static int tuner_run_frame(unsigned int f_cHz, int src, tuner_result_t *r)
 {
-    tuner_sim_set(f_cHz, tuner_decim, pure);
+    tuner_sim_set(f_cHz, tuner_decim, src);
     /* A whole window per case: the oscillator changes frequency between
      * cases, so overlapping them would mix two tones in one window. The
      * board path hops by TUNER_HOP instead. */
@@ -1259,13 +1387,13 @@ static unsigned int tuner_check_alias(void)
 
     tuner_set_decim(TUNER_DECIM);
 
-    if (!tuner_run_frame(TUNER_ALIAS_IN_CHZ, 1, &in)) {
+    if (!tuner_run_frame(TUNER_ALIAS_IN_CHZ, TUNER_SRC_PURE, &in)) {
         return 1u;
     }
     uart_puts("in-band   ");
     tuner_report(&in, 0);
 
-    if (!tuner_run_frame(TUNER_ALIAS_OUT_CHZ, 1, &out)) {
+    if (!tuner_run_frame(TUNER_ALIAS_OUT_CHZ, TUNER_SRC_PURE, &out)) {
         return 1u;
     }
     /* The note printed for this one is meaningless -- with the floor set
@@ -1399,6 +1527,60 @@ static unsigned int tuner_check_i2s(void)
         }
     }
 
+    /*
+     * Where the transfer cycles actually go: the peripheral bus, or the
+     * loop around it?
+     *
+     * The same loop shape is run against the coprocessor's DATA page and
+     * against D-mem, so the DIFFERENCE is the cost of the peri path --
+     * LSU launch, bridge, crossbar, slave, response -- and everything else
+     * cancels. Without this split, "moving the data costs more than
+     * transforming it" is a true statement that does not say what to fix.
+     *
+     * It clobbers the ring, which is why it runs before the pitch cases
+     * refill it.
+     */
+    {
+        volatile unsigned int *dmem = (volatile unsigned int *)tuner_ring;
+        unsigned int           t0, st_p, ld_p, st_d, ld_d, i;
+        unsigned int           sink = 0u;
+
+        t0 = sys_cycle();
+        for (i = 0; i < 256u; i++) {
+            FFT_DATA[i] = i;
+        }
+        st_p = sys_cycle() - t0;
+
+        t0 = sys_cycle();
+        for (i = 0; i < 256u; i++) {
+            sink += FFT_DATA[i];
+        }
+        ld_p = sys_cycle() - t0;
+
+        t0 = sys_cycle();
+        for (i = 0; i < 256u; i++) {
+            dmem[i] = i;
+        }
+        st_d = sys_cycle() - t0;
+
+        t0 = sys_cycle();
+        for (i = 0; i < 256u; i++) {
+            sink += dmem[i];
+        }
+        ld_d = sys_cycle() - t0;
+
+        uart_puts("256 accesses: peri store ");
+        tuner_put_uint(st_p);
+        uart_puts(", peri load ");
+        tuner_put_uint(ld_p);
+        uart_puts(", dmem store ");
+        tuner_put_uint(st_d);
+        uart_puts(", dmem load ");
+        tuner_put_uint(ld_d);
+        uart_puts(" cycles\r\n");
+        (void)sink;
+    }
+
     /* Hand the bus back: the pitch cases below feed the estimator from
      * the synthetic oscillator, not from the mic. */
     i2s_end();
@@ -1425,7 +1607,7 @@ int main(void)
     for (i = 0; i < TUNER_CASE_N; i++) {
         int err;
 
-        if (!tuner_run_frame(tuner_cases[i].f_cHz, 0, &r)) {
+        if (!tuner_run_frame(tuner_cases[i].f_cHz, TUNER_SRC_RICH, &r)) {
             fails++;
             break;
         }
@@ -1457,7 +1639,7 @@ int main(void)
     /* Silence must read as "no signal", not as a note picked out of the
      * rounding noise: inc = 0 holds the oscillator at zero, so after DC
      * removal the frame is all zeros. */
-    if (tuner_run_frame(0u, 0, &r)) {
+    if (tuner_run_frame(0u, TUNER_SRC_RICH, &r)) {
         tuner_report(&r, 0);
         if (r.valid) {
             uart_puts("   ^ silence reported as a pitch\r\n");
@@ -1465,6 +1647,33 @@ int main(void)
         }
     } else {
         fails++;
+    }
+
+    /*
+     * Weak fundamental: the board case. With the fundamental at a fifth of
+     * the 2nd harmonic, the lowest-strong-partial scan skips it (its bar is
+     * a quarter of the strongest bin) and the answer comes out an octave
+     * high unless the sub-harmonic rescue catches it. Two frequencies, one
+     * at each end of the range, because the rescue looks at best/2 and that
+     * has to stay inside the search band.
+     */
+    {
+        static const unsigned int weak_cHz[] = {8241u, 19600u}; /* E2, G3 */
+        static const int          weak_note[] = {2, 17};
+        unsigned int              w;
+
+        for (w = 0; w < 2u; w++) {
+            if (!tuner_run_frame(weak_cHz[w], TUNER_SRC_WEAK, &r)) {
+                fails++;
+                break;
+            }
+            uart_puts("weak fund ");
+            tuner_report(&r, 0);
+            if (!r.valid || r.note != weak_note[w]) {
+                uart_puts("   ^ reported the octave, not the fundamental\r\n");
+                fails++;
+            }
+        }
     }
 
     fails += tuner_check_alias();
@@ -1634,6 +1843,19 @@ int main(void)
      * previous result, so it must come between filling and reading. The
      * displayed reading is therefore one hop (131 ms) old.
      */
+    /*
+     * Start the count from a clean slate. Everything between i2s_begin()
+     * and here -- the mic probe, the I2C init, the 25 ms splash push that
+     * happens before the yield hook is armed -- overruns the FIFO
+     * repeatedly and legitimately, and those events would otherwise land
+     * in the counter as if they were the steady-state problem it exists to
+     * measure.
+     */
+    i2s_flush();
+    tuner_ovr_count = 0u;
+    tuner_frame_ovr = 0;
+    tuner_dirty     = TUNER_N;
+
     tuner_pump(TUNER_N); /* prime: one full window before the first launch */
     tuner_fill_fft();
     fft_start();
@@ -1694,16 +1916,28 @@ int main(void)
          * admits there is nothing there.
          */
         if (r.valid) {
+            /*
+             * SNAP, DO NOT SWEEP, when the reference note changes.
+             *
+             * Cents are relative to the nearest note, so crossing a
+             * semitone takes the reading from about +50 to about -50. That
+             * is the same pitch, described against a new reference -- but
+             * an animation reads it as a target on the far side of the
+             * dial and walks the needle backwards across the whole scale.
+             * On a slowly rising input the needle would sweep up, then
+             * visibly slide back, once per semitone.
+             *
+             * The same applies to the first reading after silence: there
+             * is nothing to sweep from.
+             */
+            if (!showing || r.note != last.note) {
+                anim_cents = r.cents;
+            }
             last         = r;
             hold         = TUNER_HOLD_FRAMES;
             tuner_floor  = TUNER_FLOOR_HOLD;
             target_cents = r.cents;
-            /* First reading after silence: place the needle instead of
-             * sweeping it in from wherever the last note left it. */
-            if (!showing) {
-                anim_cents = r.cents;
-            }
-            showing = 1;
+            showing      = 1;
             tuner_render(&r, 0, anim_cents);
         } else if (hold > 0u) {
             hold--;

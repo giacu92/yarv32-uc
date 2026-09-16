@@ -67,12 +67,14 @@ static void ssd1306_cmds(const unsigned char *c, unsigned int n)
  */
 static void (*ssd1306_yield_fn)(void);
 
-/* Bytes per I2C transaction in a paged update. 24 bytes is about 600 us at
- * 400 kHz including the address and control byte, which leaves margin
- * against a 16-entry FIFO at 15625 Hz (1.02 ms). Raise it if nothing needs
- * servicing, lower it if something does so more often. */
+/* Bytes per I2C transaction in a paged update. 16 bytes is about 430 us at
+ * 400 kHz including the address and control byte, against a 16-entry FIFO
+ * at 15625 Hz that fills in 1.02 ms -- a bit over 2x of margin. The
+ * transaction overhead is ~68 us either way, so 16 costs about 0.2 ms more
+ * per page than 24 and buys 170 us of margin, which is the better trade on
+ * a system with a hard deadline. Raise it if nothing needs servicing. */
 #ifndef SSD1306_CHUNK
-#define SSD1306_CHUNK 24u
+#define SSD1306_CHUNK 16u
 #endif
 
 /* Push the whole framebuffer in one transaction.
@@ -106,13 +108,26 @@ static void ssd1306_update_page(unsigned int page)
 {
     const unsigned char *p = &ssd1306_fb[page * SSD1306_WIDTH];
     unsigned int off = 0u;
+    /* Column range 0..WIDTH-1, then page range page..page. */
+    const unsigned char win[6] = {0x21u, 0x00u, (unsigned char)(SSD1306_WIDTH - 1u),
+                                  0x22u, (unsigned char)page, (unsigned char)page};
 
-    ssd1306_cmd(0x21);
-    ssd1306_cmd(0x00);
-    ssd1306_cmd(SSD1306_WIDTH - 1u);
-    ssd1306_cmd(0x22);
-    ssd1306_cmd((unsigned char)page);
-    ssd1306_cmd((unsigned char)page);
+    /*
+     * ONE transaction for the six setup bytes, not six.
+     *
+     * Each separate ssd1306_cmd() is a full I2C transaction -- start,
+     * address, control byte, data, stop -- about 68 us at 400 kHz, so six
+     * of them are ~420 us of bus with no yield in the middle. Landing
+     * straight after a data chunk that itself took ~430 us, that put the
+     * worst blind window at ~0.85 ms against a FIFO that fills in 1.02 ms,
+     * which is not margin, it is luck. As one transaction the burst is
+     * ~180 us, and the yields either side bound the gap to a single chunk.
+     */
+    if (ssd1306_yield_fn)
+        ssd1306_yield_fn();
+    ssd1306_cmds(win, sizeof win);
+    if (ssd1306_yield_fn)
+        ssd1306_yield_fn();
 
     while (off < SSD1306_WIDTH) {
         unsigned int n = SSD1306_WIDTH - off;

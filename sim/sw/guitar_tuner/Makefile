@@ -6,7 +6,7 @@
 #   make clean    remove both build directories
 #
 # The board build drives real hardware: an INMP441 I2S microphone on the
-# I2S pins (SCK->PIN80, WS->PIN81, SD->PIN82, L/R->GND) with the peripheral
+# I2S pins (SCK->PIN73, WS->PIN74, SD->PIN75, L/R->GND) with the peripheral
 # in MASTER mode -- the mic is itself a clock slave, so the FPGA has to
 # clock it -- and an SSD1306 128x64 at 0x3C on the I2C master. Neither
 # device is modelled in the simulator.

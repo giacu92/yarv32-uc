@@ -58,8 +58,11 @@
  *
  * Board wiring
  * ------------
- *   MIC   INMP441 on the I2S pins: SCK -> PIN80 (BCLK), WS -> PIN81
- *         (LRCK), SD -> PIN82, L/R -> GND (left slot), VDD 3.3 V.
+ *   MIC   INMP441 on the I2S pins: SCK -> PIN73 (BCLK), WS -> PIN74
+ *         (LRCK), SD -> PIN75, L/R -> GND (left slot), VDD 3.3 V.
+ *         Those three are free BANK1 header pins at 3.3 V; the board's
+ *         own I2S_* pins are its audio OUTPUT path and are not usable
+ *         for a microphone.
  *         No bias network and no anti-alias op-amp: the part is digital
  *         and outputs 24-bit two's complement, which is the main reason
  *         this replaced the MCP3208 front end.
@@ -169,13 +172,31 @@ _Static_assert(TUNER_CHZ_NUM * 5u == TUNER_FS_MHZ,
  * would only make the CIC accumulators wider. */
 #define TUNER_IN_SHIFT 8u
 
-/* Below this peak magnitude there is nothing to tune. With 1/N scaling a
- * sinusoid of Q15 amplitude A lands near A/4 after the triangular window,
- * so 200 is about A = 800, i.e. -32 dBFS. An INMP441 is -26 dBFS at 94
- * dBSPL, so a guitar played near the mic clears this comfortably; drop it
- * if the mic sits across the room, raise it if a noisy room reports
- * phantom notes. */
-#define TUNER_SIGNAL_FLOOR 200u
+/*
+ * Signal detection: a Schmitt trigger plus a hold, not one threshold.
+ *
+ * With 1/N scaling a sinusoid of Q15 amplitude A lands near A/4 after the
+ * triangular window, so full scale is about 8000 and these are roughly
+ * -42 dBFS to catch a note and -52 dBFS to keep one. Two thresholds
+ * because a plucked string DECAYS: a single level either sits high enough
+ * to reject room noise and then drops the reading a second after the
+ * pluck, or sits low enough to hold the note and then reports phantom
+ * pitches out of the noise between plucks. Catching hard and releasing
+ * soft does both.
+ *
+ * The hold is the other half. A frame is 0.52 s, so even the release
+ * threshold loses a decaying string well before the player has finished
+ * turning the peg; TUNER_HOLD_FRAMES keeps the last reading on screen
+ * after the signal is gone, and the display marks it as held rather than
+ * pretending it is live.
+ *
+ * Both numbers are room-dependent and meant to be adjusted: raise
+ * ATTACK if a noisy room reports notes with nothing played, lower it if a
+ * mic across the room never triggers.
+ */
+#define TUNER_FLOOR_ATTACK 60u
+#define TUNER_FLOOR_HOLD   20u
+#define TUNER_HOLD_FRAMES  6u
 
 /* A quarter of the strongest bin is "a real partial". */
 #define TUNER_PEAK_FRACTION 4u
@@ -261,6 +282,25 @@ static void tuner_set_decim(unsigned int r)
 #define tuner_cic_shift TUNER_CIC_SHIFT
 #endif
 
+/*
+ * Per-frame diagnostics from the acquisition itself (board build only).
+ *
+ * tuner_raw_min/max are the mic's own numbers before the CIC, the window
+ * and the transform, which is the one measurement that separates "the bus
+ * is dead" from "the signal is too quiet": a dead SD line pins both at 0,
+ * a live but quiet mic gives a small non-zero swing, and a clipping one
+ * hits +/-32767.
+ *
+ * tuner_frame_ovr is the overrun flag AS OF THE END OF THE FRAME, which is
+ * not the same thing as the flag at any other moment -- see the loop in
+ * main().
+ */
+#if !TUNER_SIM
+static int tuner_raw_min;
+static int tuner_raw_max;
+static int tuner_frame_ovr;
+#endif
+
 /* Result of one frame. */
 typedef struct {
     int          valid;  /* a pitch was found at all */
@@ -273,6 +313,11 @@ typedef struct {
 /* Magnitude of every usable bin. Read once per frame so the peak search
  * and the interpolation work on memory instead of re-reading MMIO. */
 static unsigned short tuner_mag[TUNER_N / 2u];
+
+/* The floor in force for the current frame: ATTACK while nothing is
+ * being tracked, HOLD once a note has been caught (see the note above).
+ * The self-check leaves it at ATTACK throughout. */
+static unsigned int tuner_floor = TUNER_FLOOR_ATTACK;
 
 /* ---------------------------------------------------------------- */
 /* Acquisition                                                       */
@@ -462,11 +507,25 @@ static void tuner_acquire(void)
     i2s_flush();
 #endif
 
+#if !TUNER_SIM
+    tuner_raw_min = 32767;
+    tuner_raw_max = -32768;
+#endif
+
     for (i = 0; i < TUNER_N; i++) {
         int s, c1, c2;
 
         for (d = 0; d < tuner_decim; d++) {
-            i1 += tuner_mic_sample();
+            int raw = tuner_mic_sample();
+#if !TUNER_SIM
+            if (raw < tuner_raw_min) {
+                tuner_raw_min = raw;
+            }
+            if (raw > tuner_raw_max) {
+                tuner_raw_max = raw;
+            }
+#endif
+            i1 += raw;
             i2 += i1;
         }
 
@@ -486,6 +545,14 @@ static void tuner_acquire(void)
         sum += s;
         fft_write_real(i, s);
     }
+
+#if !TUNER_SIM
+    /* The flag as of HERE: the flush above cleared whatever the previous
+     * frame's display push produced, so anything set now happened while
+     * this frame was being read -- the only case that corrupts a
+     * spectrum. */
+    tuner_frame_ovr = i2s_overrun();
+#endif
 
     mean = sum / (int)TUNER_N;
 
@@ -520,20 +587,36 @@ static void tuner_read_spectrum(void)
  * See the header: the loudest bin is often a harmonic, so the loudest is
  * only used to set a threshold, and the answer is the LOWEST local
  * maximum that reaches a quarter of it.
+ *
+ * TWO gates decide "is there a signal", and they fail differently on
+ * purpose. The absolute floor (tuner_floor) rejects a quiet room. The
+ * SNR gate rejects a LOUD one: the peak must also stand
+ * TUNER_SNR_RATIO times above the mean of the whole search band, which a
+ * real note does easily -- one bin out of ~190 barely moves that mean --
+ * and broadband noise never does, however loud it gets. The second gate
+ * is what makes the low absolute floor safe: without it, turning the
+ * sensitivity up far enough to catch a decaying string also turns it up
+ * far enough to report pitches out of room rumble.
  */
+#define TUNER_SNR_RATIO 4u
+
 static int tuner_find_fundamental(unsigned int *peak_out)
 {
     unsigned int k, best = TUNER_KMIN, bestm = 0u, thr;
+    unsigned int sum = 0u, mean;
 
     for (k = TUNER_KMIN; k <= TUNER_KMAX; k++) {
+        sum += tuner_mag[k];
         if (tuner_mag[k] > bestm) {
             bestm = tuner_mag[k];
             best  = k;
         }
     }
 
+    mean = sum / (TUNER_KMAX - TUNER_KMIN + 1u);
+
     *peak_out = bestm;
-    if (bestm < TUNER_SIGNAL_FLOOR) {
+    if (bestm < tuner_floor || bestm < TUNER_SNR_RATIO * mean) {
         return -1;
     }
 
@@ -726,13 +809,26 @@ static void tuner_banner(unsigned int y, const char *s, int inverted)
     }
 }
 
-static void tuner_render(const tuner_result_t *r)
+/*
+ * One screen. `held` means the reading is the last good one and the
+ * signal has since fallen below the release threshold -- still the best
+ * estimate there is, so it stays on the gauge, but marked.
+ *
+ * THE SCALE IS DRAWN IN EVERY STATE, including no-signal. A tuner whose
+ * layout jumps between two different screens is hard to read while you
+ * are turning a peg; what changes is the needle and the bottom line, not
+ * the furniture. The needle is the one thing NOT drawn when there is no
+ * reading -- parking it at centre would be indistinguishable from a
+ * perfectly tuned string.
+ */
+static void tuner_render(const tuner_result_t *r, int held)
 {
     ssd1306_clear();
 
     if (!r->valid) {
-        tuner_banner(12u, "NO SIGNAL", 0);
-        tuner_banner(32u, "PLUCK A STRING", 0);
+        tuner_banner(2u, "PLUCK A STRING", 0);
+        tuner_draw_scale();
+        tuner_banner(54u, "NO SIGNAL", 0);
         ssd1306_update();
         return;
     }
@@ -741,6 +837,12 @@ static void tuner_render(const tuner_result_t *r)
      * characters so a sharp appearing or disappearing does not shift the
      * frequency field next to it. */
     ssd1306_text_scaled(2u, 0u, tuner_notes[r->note].name, 2u, 1);
+
+    /* Held readings are marked, so a stale note is never mistaken for a
+     * live one. Top right corner, out of the way of the numbers. */
+    if (held) {
+        ssd1306_text(SSD1306_WIDTH - 6u, 0u, "H", 1);
+    }
 
     /* Measured frequency, two decimals, right of the note name. */
     {
@@ -805,11 +907,24 @@ static void tuner_put_chz(unsigned int v)
     uart_putc((char)('0' + v % 10u));
 }
 
-static void tuner_report(const tuner_result_t *r)
+static void tuner_report(const tuner_result_t *r, int held)
 {
+    if (held) {
+        uart_puts("(held) ");
+    }
     if (!r->valid) {
         uart_puts("-- no signal (peak ");
         tuner_put_uint(r->peak);
+#if !TUNER_SIM
+        /* The raw mic swing is what says WHICH kind of no-signal this is
+         * (see tuner_raw_min/max above). */
+        uart_puts(", raw ");
+        tuner_put_int(tuner_raw_min);
+        uart_puts("..");
+        tuner_put_int(tuner_raw_max);
+        uart_puts(", floor ");
+        tuner_put_uint(tuner_floor);
+#endif
         uart_puts(")\r\n");
         return;
     }
@@ -906,13 +1021,17 @@ static unsigned int tuner_check_alias(void)
         return 1u;
     }
     uart_puts("in-band   ");
-    tuner_report(&in);
+    tuner_report(&in, 0);
 
     if (!tuner_run_frame(TUNER_ALIAS_OUT_CHZ, 1, &out)) {
         return 1u;
     }
+    /* The note printed for this one is meaningless -- with the floor set
+     * low enough to catch a decaying string, a 1/49 residue can still
+     * clear it. The CRITERION is the peak ratio below, not whether the
+     * alias was called a pitch. */
     uart_puts("aliasing  ");
-    tuner_report(&out);
+    tuner_report(&out, 0);
 
     /* The in-band tone must survive the decimator and still read as D4. */
     if (!in.valid) {
@@ -1026,7 +1145,7 @@ int main(void)
             fails++;
             break;
         }
-        tuner_report(&r);
+        tuner_report(&r, 0);
 
         if (!r.valid || r.note != tuner_cases[i].note) {
             uart_puts("   ^ wrong note, wanted ");
@@ -1055,7 +1174,7 @@ int main(void)
      * rounding noise: inc = 0 holds the oscillator at zero, so after DC
      * removal the frame is all zeros. */
     if (tuner_run_frame(0u, 0, &r)) {
-        tuner_report(&r);
+        tuner_report(&r, 0);
         if (r.valid) {
             uart_puts("   ^ silence reported as a pitch\r\n");
             fails++;
@@ -1081,9 +1200,84 @@ int main(void)
 
 #else /* board */
 
+/*
+ * Bring-up probe, run once before the tuning loop.
+ *
+ * It answers the only question worth asking first on a silent link -- is
+ * ANYTHING arriving -- and it distinguishes the three failure shapes that
+ * all look identical from the tuner's output:
+ *
+ *   nothing queued at all   the peripheral never captured a word: no BCLK
+ *                           coming back, or the mic is in the other slot
+ *                           (L/R tied high instead of to GND).
+ *   words, all zero         the bus is clocking and framing but SD is not
+ *                           connected, or the mic is unpowered -- a
+ *                           pulled-down pad reads a clean 0.
+ *   words with a swing      the front end works; anything else is a level
+ *                           question, and the numbers here say by how much.
+ */
+static void tuner_mic_probe(void)
+{
+    int          lo = 32767, hi = -32768;
+    unsigned int got = 0u, spin = 0u, nonzero = 0u;
+    int          s;
+
+    uart_puts("mic probe: ");
+    i2s_flush();
+
+    /* Bounded: roughly 64 frames' worth of core cycles, so a dead bus
+     * reports instead of hanging. */
+    while (got < 64u && spin < 64u * 4u * (TUNER_CORE_HZ / TUNER_FS_IN_HZ)) {
+        if (i2s_available()) {
+            (void)i2s_read(&s);
+            s >>= TUNER_IN_SHIFT;
+            if (s < lo) {
+                lo = s;
+            }
+            if (s > hi) {
+                hi = s;
+            }
+            if (s != 0) {
+                nonzero++;
+            }
+            got++;
+        }
+        spin++;
+    }
+
+    tuner_put_uint(got);
+    uart_puts(" words, ");
+    tuner_put_uint(nonzero);
+    uart_puts(" non-zero, range ");
+    if (got) {
+        tuner_put_int(lo);
+        uart_puts("..");
+        tuner_put_int(hi);
+    } else {
+        uart_puts("n/a");
+    }
+    uart_puts("\r\n");
+
+    if (got == 0u) {
+        uart_puts("   no words at all -- check BCLK/WS reach the mic "
+                  "(pins 73/74) and that L/R is tied to GND\r\n");
+    } else if (nonzero == 0u) {
+        uart_puts("   words arrive but all zero -- check SD (pin 75) and "
+                  "the mic's 3V3\r\n");
+    }
+    if (i2s_overrun()) {
+        /* Expected here: this probe reads far slower than the stream. */
+        i2s_overrun_clear();
+    }
+}
+
 int main(void)
 {
     tuner_result_t r;
+    tuner_result_t last;          /* last reading with a real signal */
+    unsigned int   hold = 0u;     /* frames left to keep showing it */
+
+    last.valid = 0;
 
     uart_puts("\r\nYARV guitar tuner\r\n");
 
@@ -1104,6 +1298,7 @@ int main(void)
         }
     }
     i2s_begin(I2S_WLEN_24, I2S_CHAN_LEFT, I2S_FMT_I2S);
+    tuner_mic_probe();
 
     i2c_begin_hz(TUNER_I2C_HZ);
 
@@ -1133,18 +1328,46 @@ int main(void)
         }
         fft_start();
 
-        tuner_analyse(&r);
-        tuner_render(&r);
-        tuner_report(&r);
+        /* Only an overrun DURING the frame means anything: the samples
+         * that pile up during the display push and this report are
+         * discarded on purpose by the flush at the top of
+         * tuner_acquire(), and frames are independent, so losing the gap
+         * between them costs nothing.
+         *
+         * Reading the live flag HERE instead -- which is what this loop
+         * did until 2026-09-16 -- reports an overrun on every single
+         * iteration, because the 25 ms display push always overruns a
+         * 1 ms FIFO. tuner_acquire() captures the flag at the end of the
+         * frame, which is the only moment at which it is a fault. */
+        if (tuner_frame_ovr) {
+            uart_puts("!! I2S overrun DURING acquisition -- spectrum is "
+                      "not contiguous\r\n");
+        }
 
-        /* An overrun INSIDE a frame means the acquisition loop could not
-         * keep up with the mic, which would corrupt the spectrum rather
-         * than merely interrupt it -- worth saying out loud. (The gap
-         * around the display push does not show up here: tuner_acquire()
-         * flushes, and flushing clears the flag.) */
-        if (i2s_overrun()) {
-            uart_puts("!! I2S overrun during acquisition\r\n");
-            i2s_overrun_clear();
+        tuner_analyse(&r);
+
+        /*
+         * Catch hard, release soft, then hold. A live reading refills the
+         * hold counter and lowers the floor, so a decaying string keeps
+         * its note while the peg is being turned; once even the release
+         * threshold is gone the last reading stays on the gauge for
+         * TUNER_HOLD_FRAMES (about 3 seconds) before the display admits
+         * there is nothing there.
+         */
+        if (r.valid) {
+            last        = r;
+            hold        = TUNER_HOLD_FRAMES;
+            tuner_floor = TUNER_FLOOR_HOLD;
+            tuner_render(&r, 0);
+            tuner_report(&r, 0);
+        } else if (hold > 0u) {
+            hold--;
+            tuner_render(&last, 1);
+            tuner_report(&last, 1);
+        } else {
+            tuner_floor = TUNER_FLOOR_ATTACK;
+            tuner_render(&r, 0);
+            tuner_report(&r, 0);
         }
     }
 }

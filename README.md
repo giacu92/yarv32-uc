@@ -236,9 +236,9 @@ its readable form. All IOs are LVCMOS33.
 | `gpio_io[1]` | 42 | pull-up, DRIVE=8 | free right-header IO |
 | `gpio_io[2]` | 71 | pull-up, DRIVE=8 | free right-header IO |
 | `gpio_io[3]` | 72 | pull-up, DRIVE=8 | free right-header IO |
-| `i2s_bclk_io` | 80 | pull-down, DRIVE=8 | I2S bit clock — driven in master mode, released in slave mode |
-| `i2s_lrck_io` | 81 | pull-down, DRIVE=8 | I2S word select (low = left), same direction rule |
-| `i2s_sd_i` | 82 | pull-down | I2S serial data in |
+| `i2s_bclk_io` | 73 | pull-down, DRIVE=8 | I2S bit clock — driven in master mode, released in slave mode |
+| `i2s_lrck_io` | 74 | pull-down, DRIVE=8 | I2S word select (low = left), same direction rule |
+| `i2s_sd_i` | 75 | pull-down | I2S serial data in |
 | `led_o[0]` | 15 | pull-up, DRIVE=8 | onboard LED — mirrors GPIO0 when DIR=out |
 | `led_o[1]` | 16 | pull-up, DRIVE=8 | onboard LED — slow counter bit |
 | `led_o[2]` | 17 | pull-up, DRIVE=8 | onboard LED — slow counter bit |
@@ -248,8 +248,14 @@ The I2C pins carry only the weak internal pull-up as a fallback — a real
 bus needs external pull-ups. GPIO pins read a defined 1 when released or
 unconnected, which matches the sim's loopback model. The I2S pins pull
 down, so an unconnected bus reads a static 0 — no BCLK, therefore nothing
-captured, rather than noise shifted into the FIFO. PIN83–85 (the rest of
-the onboard microSD slot, whose SDIO controller was dropped) stay free.
+captured, rather than noise shifted into the FIFO; they sit on three free
+BANK1 header pins (IOT40A / IOT34B / IOT34A) rather than on the microSD
+pins, because **81–84 are not broken out to any header** — they reach the
+TF card connector and nothing else, so no external device can be wired to
+them. The board's own `I2S_BCLK`/`I2S_LRCK`/`I2S_DIN` pins (56/55/54) are
+deliberately not used either: that is the onboard audio *output* path to
+the amplifier. PIN80–85 (the microSD slot, whose SDIO controller was
+dropped) stay free.
 
 ### Clocking
 

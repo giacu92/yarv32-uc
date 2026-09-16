@@ -25,24 +25,35 @@ IO_PORT "uart_txd_o" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
 IO_LOC "uart_rxd_i" 70;
 IO_PORT "uart_rxd_i" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
 
-// PIN80..85 (onboard microSD slot) are free: the SDIO controller that used
-// them was dropped from this branch. Three of them now carry the I2S
-// receiver.
+// PIN80..85 (onboard microSD slot) are free as far as the FPGA is
+// concerned -- the SDIO controller that used them was dropped -- but only
+// 80 and 85 are broken out to a header. 81..84 go to the TF card connector
+// and nowhere else, so nothing external can be wired to them.
 
-// I2S receiver. BCLK and LRCK are BIDIRECTIONAL: the peripheral drives
-// them in master mode (an INMP441 is itself a clock slave, so something
-// has to) and releases them when an external device is the master, so they
-// need DRIVE=8 as well as a pull. SD is data in, always an input.
+// I2S receiver, on the three free BANK1 header pins at the top left of the
+// board (73/74/75 = IOT40A / IOT34B / IOT34A, VCCIO 3.3 V, no onboard
+// function). They were chosen over the microSD pins for the reason above:
+// an external microphone has to reach an actual header.
+//
+// BCLK and LRCK are BIDIRECTIONAL: the peripheral drives them in master
+// mode (an INMP441 is itself a clock slave, so something has to) and
+// releases them when an external device is the master, so they need
+// DRIVE=8 as well as a pull. SD is data in, always an input.
 // PULL_MODE=DOWN throughout, not UP: an unconnected or released bus then
 // reads a static 0, which the receiver sees as "no BCLK" and therefore
 // captures nothing -- whereas a floating pad would toggle and shift noise
 // into the FIFO. The board top double-flops all three before the
 // peripheral, and samples the PADS even in master mode.
-IO_LOC "i2s_bclk_io" 80;
+//
+// NOT the board's own I2S pins (54/55/56, labelled I2S_DIN / I2S_LRCK /
+// I2S_BCLK): those are the onboard audio OUTPUT path to the amplifier
+// (PA_EN on 51, SPEAKER_P/N), i.e. data flowing out of the FPGA, and they
+// carry an onboard load.
+IO_LOC "i2s_bclk_io" 73;
 IO_PORT "i2s_bclk_io" IO_TYPE=LVCMOS33 PULL_MODE=DOWN DRIVE=8 BANK_VCCIO=3.3;
-IO_LOC "i2s_lrck_io" 81;
+IO_LOC "i2s_lrck_io" 74;
 IO_PORT "i2s_lrck_io" IO_TYPE=LVCMOS33 PULL_MODE=DOWN DRIVE=8 BANK_VCCIO=3.3;
-IO_LOC "i2s_sd_i" 82;
+IO_LOC "i2s_sd_i" 75;
 IO_PORT "i2s_sd_i" IO_TYPE=LVCMOS33 PULL_MODE=DOWN BANK_VCCIO=3.3;
 
 // I2C master. Open-drain lines: pin is driven low or released; PULL_MODE=UP

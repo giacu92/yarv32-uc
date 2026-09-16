@@ -29,7 +29,7 @@
  * slot silent -- answers on them, which is the configuration the guitar
  * tuner runs on the board.
  *
- * On the board the same firmware needs a real I2S device on PIN80/81/82
+ * On the board the same firmware needs a real I2S device on PIN73/74/75
  * (BCLK/LRCK/SD), and the value checks will fail against a live
  * microphone -- this is a simulation oracle, not board bring-up.
  *

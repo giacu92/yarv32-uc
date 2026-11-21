@@ -12,7 +12,17 @@ import rv32_pkg::*;
 * CSR RMW result (csr_wdata / csr_wren).
 *
 * Implemented CSRs (machine mode): mstatus, misa, mie, mtvec, mscratch,
-* mepc, mcause, mtval, mip, mcycle, minstret (11 entries, NCSR).
+* mepc, mcause, mtval, mip, mcycle, minstret (11 entries, NCSR), plus the
+* upper halves mcycleh / minstreth (separate flops) and the read-only Zicntr
+* shadows cycle / time / instret and their h halves (2026-11-22). time is the
+* CLINT's mtime, wired in on mtime_i, so software reading the CSR and the
+* MMIO register sees one clock.
+*
+* Counter write semantics (priv. spec): a CSR write to either half of
+* mcycle / minstret replaces that half, and the instruction doing the write
+* does not also increment the counter -- the value written is the value the
+* next instruction reads. That is what rv32mi-instret_overflow case 3 checks
+* (a write to minstreth must suppress the minstret increment too).
 * Unimplemented CSR addresses read as 0 and ignore writes (no
 * illegal-instruction trap yet, so a read of an unimplemented CSR returns 0
 * rather than trapping).
@@ -85,6 +95,9 @@ module csr_regfile (
     output wire [XLEN-1:0] mip_o,
     output wire [XLEN-1:0] mie_o,
 
+    // The CLINT's 64-bit mtime, for the read-only time / timeh CSRs.
+    input wire [63:0] mtime_i,
+
     // Instruction retire stat (consumed by minstret). Future
     // mhpmcounter / branch-prediction counters would add their own
     // retire-side inputs here when implemented.
@@ -93,8 +106,25 @@ module csr_regfile (
     // Index map: implemented CSRs packed into a 9-entry array. The case
     // statements below translate the 12-bit CSR address to/from this index.
     localparam int unsigned NCSR = 11;
-    logic [XLEN-1:0] regs[NCSR-1:0];
+    logic [XLEN-1:0] regs                                                             [NCSR-1:0];
     logic [XLEN-1:0] csr_rdata;
+
+    // Upper halves of the 64-bit counters; the low halves stay regs[9]
+    // (mcycle) and regs[10] (minstret).
+    logic [XLEN-1:0] mcycleh_q;
+    logic [XLEN-1:0] minstreth_q;
+
+    wire             wr_mcycle = csr_wren_i && (csr_addr_i == CSR_ADDR_MCYCLE);
+    wire             wr_mcycleh = csr_wren_i && (csr_addr_i == CSR_ADDR_MCYCLEH);
+    wire             wr_minstret = csr_wren_i && (csr_addr_i == CSR_ADDR_MINSTRET);
+    wire             wr_minstreth = csr_wren_i && (csr_addr_i == CSR_ADDR_MINSTRETH);
+    wire  [    63:0] mcycle_inc = {mcycleh_q, regs[9]} + 64'd1;
+    // instr_retire_i is execute's COMMIT-cycle pulse (op_commits), the same
+    // cycle a CSR instruction's write lands -- so a minstret/minstreth write
+    // suppresses exactly its own instruction's increment. (It used to be the
+    // registered ex_valid, a cycle late: a csrr right after an instruction
+    // then read a count that did not yet include it.)
+    wire  [    63:0] minstret_inc = {minstreth_q, regs[10]} + {63'd0, instr_retire_i};
 
     // Architected reset values (M-mode). misa = RV32 I/M/C:
     //   MXL[31:30]=1 (RV32), C=bit2, I=bit8, M=bit13.
@@ -110,23 +140,33 @@ module csr_regfile (
 
     always_comb begin
         case (csr_addr_i)
-            CSR_ADDR_MSTATUS:  csr_rdata = regs[0];
-            CSR_ADDR_MISA:     csr_rdata = regs[1];
-            CSR_ADDR_MIE:      csr_rdata = regs[2];
-            CSR_ADDR_MTVEC:    csr_rdata = regs[3];
-            CSR_ADDR_MSCRATCH: csr_rdata = regs[4];
-            CSR_ADDR_MEPC:     csr_rdata = regs[5];
-            CSR_ADDR_MCAUSE:   csr_rdata = regs[6];
-            CSR_ADDR_MTVAL:    csr_rdata = regs[7];
-            CSR_ADDR_MIP:      csr_rdata = regs[8];
-            CSR_ADDR_MCYCLE:   csr_rdata = regs[9];
-            CSR_ADDR_MINSTRET: csr_rdata = regs[10];
-            default:           csr_rdata = '0;  // Unimplemented CSRs read as 0
+            CSR_ADDR_MSTATUS:   csr_rdata = regs[0];
+            CSR_ADDR_MISA:      csr_rdata = regs[1];
+            CSR_ADDR_MIE:       csr_rdata = regs[2];
+            CSR_ADDR_MTVEC:     csr_rdata = regs[3];
+            CSR_ADDR_MSCRATCH:  csr_rdata = regs[4];
+            CSR_ADDR_MEPC:      csr_rdata = regs[5];
+            CSR_ADDR_MCAUSE:    csr_rdata = regs[6];
+            CSR_ADDR_MTVAL:     csr_rdata = regs[7];
+            CSR_ADDR_MIP:       csr_rdata = regs[8];
+            CSR_ADDR_MCYCLE:    csr_rdata = regs[9];
+            CSR_ADDR_MINSTRET:  csr_rdata = regs[10];
+            CSR_ADDR_MCYCLEH:   csr_rdata = mcycleh_q;
+            CSR_ADDR_MINSTRETH: csr_rdata = minstreth_q;
+            CSR_ADDR_CYCLE:     csr_rdata = regs[9];
+            CSR_ADDR_TIME:      csr_rdata = mtime_i[31:0];
+            CSR_ADDR_INSTRET:   csr_rdata = regs[10];
+            CSR_ADDR_CYCLEH:    csr_rdata = mcycleh_q;
+            CSR_ADDR_TIMEH:     csr_rdata = mtime_i[63:32];
+            CSR_ADDR_INSTRETH:  csr_rdata = minstreth_q;
+            default:            csr_rdata = '0;  // Unimplemented CSRs read as 0
         endcase
     end
 
     always_ff @(posedge clk_i) begin
         if (!rstn_i) begin
+            mcycleh_q   <= '0;
+            minstreth_q <= '0;
             for (int i = 0; i < NCSR; i++) begin
 
                 if (i == 0) begin
@@ -139,11 +179,19 @@ module csr_regfile (
             end
         end else begin
 
-            // Free-running counters: incremented every cycle (architected),
-            // not gated by csr_wren_i. A CSR write (below) overrides the
-            // increment the same cycle (last nonblocking assignment wins).
-            regs[9]  <= regs[9] + 1;  // MCYCLE
-            regs[10] <= instr_retire_i ? regs[10] + 1 : regs[10];  // MINSTRET
+            // 64-bit counters. mcycle counts every cycle, minstret every
+            // retire. A CSR write to EITHER half suppresses the whole
+            // counter's increment that cycle -- the written value is what
+            // the next instruction reads, and the untouched half holds
+            // (no carry from an increment that did not happen).
+            if (!(wr_mcycle || wr_mcycleh)) begin
+                regs[9]   <= mcycle_inc[31:0];
+                mcycleh_q <= mcycle_inc[63:32];
+            end
+            if (!(wr_minstret || wr_minstreth)) begin
+                regs[10]    <= minstret_inc[31:0];
+                minstreth_q <= minstret_inc[63:32];
+            end
 
             // --- Trap-write bundle (one cycle, each a distinct CSR).
             // Priority over the RMW port: a trap suppresses the RMW this
@@ -194,8 +242,13 @@ module csr_regfile (
             end
 
             // --- mcycle / minstret RMW (overrides the increment above). ---
-            if (csr_wren_i && (csr_addr_i == CSR_ADDR_MCYCLE)) regs[9] <= csr_data_i;
-            if (csr_wren_i && (csr_addr_i == CSR_ADDR_MINSTRET)) regs[10] <= csr_data_i;
+            if (wr_mcycle) regs[9] <= csr_data_i;
+            if (wr_mcycleh) mcycleh_q <= csr_data_i;
+            if (wr_minstret) regs[10] <= csr_data_i;
+            if (wr_minstreth) minstreth_q <= csr_data_i;
+            // cycle / time / instret and their h halves are read-only
+            // shadows: a write to them is ignored here (and is an illegal
+            // instruction once the illegal-CSR trap exists).
             // misa is read-only here: ignore writes.
         end
     end
@@ -225,17 +278,19 @@ module csr_regfile (
     // Sim-only: mirror the reset values at time 0 so waveforms/logs do not
     // show X before the first reset edge. Matches the sync reset above.
     initial begin
-        regs[0]  = MSTATUS_RESET;
-        regs[1]  = MISA_RESET;
-        regs[2]  = '0;
-        regs[3]  = '0;
-        regs[4]  = '0;
-        regs[5]  = '0;
-        regs[6]  = '0;
-        regs[7]  = '0;
-        regs[8]  = '0;
-        regs[9]  = '0;
-        regs[10] = '0;
+        regs[0]     = MSTATUS_RESET;
+        regs[1]     = MISA_RESET;
+        regs[2]     = '0;
+        regs[3]     = '0;
+        regs[4]     = '0;
+        regs[5]     = '0;
+        regs[6]     = '0;
+        regs[7]     = '0;
+        regs[8]     = '0;
+        regs[9]     = '0;
+        regs[10]    = '0;
+        mcycleh_q   = '0;
+        minstreth_q = '0;
     end
 `endif
 

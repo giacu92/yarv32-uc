@@ -270,11 +270,9 @@ regress: $(TOP)
 #                     own .text, i.e. from the I-mem, through a data load.
 #                     Cases 2-5 and 8-30 (every actual RVC encoding) pass.
 #   rv32mi-pmpaddr    No PMP.
-#   rv32mi-instret_overflow  Fails at case 3: mcycleh / minstreth (the upper
-#                     halves RV32 mandates) are not implemented, so a write to
-#                     minstreth neither lands nor suppresses that
-#                     instruction's count. This is the one entry in the list
-#                     that is a genuine gap rather than a design choice.
+# (rv32mi-instret_overflow left this list on 2026-11-22: mcycleh / minstreth
+# are implemented, and minstret now counts in the commit cycle, so a write
+# to either half suppresses the writing instruction's own increment.)
 COMPLIANCE_DIR  := sw/compliance
 COMPLIANCE_MAXC ?= 100000
 
@@ -282,8 +280,7 @@ COMPLIANCE_XFAIL := \
 	rv32ui-fence_i:539 \
 	rv32ui-ma_data:539 \
 	rv32uc-rvc:d \
-	rv32mi-pmpaddr:3 \
-	rv32mi-instret_overflow:7
+	rv32mi-pmpaddr:3
 
 compliance: $(TOP)
 	@builds=$$(ls -d $(COMPLIANCE_DIR)/build/*/ 2>/dev/null); \

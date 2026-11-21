@@ -118,28 +118,29 @@ module sim_top #(
     // -----------------------------------------------------------------
     // Fetch I-mem port is 64-bit read-only (ifetch); the LSU D-mem port stays
     // on the 32-bit byte-strobed mem_req_t / mem_rsp_t.
-    ifetch_req_t imem_req;
-    ifetch_rsp_t imem_rsp;
-    mem_req_t    dmem_req;
-    mem_rsp_t    dmem_rsp;
+    ifetch_req_t        imem_req;
+    ifetch_rsp_t        imem_rsp;
+    mem_req_t           dmem_req;
+    mem_rsp_t           dmem_rsp;
     // The read-only I-mem holds BVALID low (no write-ack); sink it so the
     // port is connected (a native_ram write-ack only exists for the D-mem).
-    wire         imem_bvalid_unused;
+    wire                imem_bvalid_unused;
 
     // Interrupt pending bits (mip.MSIP / mip.MTIP sources).
-    wire         msip;
-    wire         mtip;
+    wire                msip;
+    wire                mtip;
+    wire         [63:0] mtime;
     // Machine external interrupt: the PLIC aggregates the peripheral
     // level IRQs (UART / I2C / SPI / GPIO), same as the board top. The
     // source IRQs reset deasserted, so they never raise meip unless a
     // test enables them through MMIO.
-    wire         uart_irq;
-    wire         i2c_irq;
-    wire         spi_irq;
-    wire         gpio_irq;
-    wire         fft_irq;
-    wire         i2s_irq;
-    wire         meip;
+    wire                uart_irq;
+    wire                i2c_irq;
+    wire                spi_irq;
+    wire                gpio_irq;
+    wire                fft_irq;
+    wire                i2s_irq;
+    wire                meip;
 
     // -----------------------------------------------------------------
     // CPU. Functional ports only; debug is observed via the Verilator
@@ -168,6 +169,7 @@ module sim_top #(
         .dmem_rsp_i (dmem_rsp),
         .msip_i     (msip),
         .mtip_i     (mtip),
+        .mtime_i    (mtime),
         .meip_i     (meip)
     );
 
@@ -778,10 +780,11 @@ module sim_top #(
     );
 
     clint_timer u_timer (
-        .clk_i (clk_i),
-        .rstn_i(rstn_i),
-        .axi   (axi_bus_timer.slave),
-        .mtip_o(mtip)
+        .clk_i  (clk_i),
+        .rstn_i (rstn_i),
+        .axi    (axi_bus_timer.slave),
+        .mtip_o (mtip),
+        .mtime_o(mtime)
     );
 
     // Double-flop the harness RX line before the UART, exactly as

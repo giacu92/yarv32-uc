@@ -268,6 +268,7 @@ module top_module (
     // Interrupt pending bits from the peri MMIO slaves.
     wire         msip;
     wire         mtip;
+    wire [63:0] mtime;
 
     // Machine external interrupt: the PLIC aggregates the peripheral
     // level IRQs (UART / I2C / SPI / GPIO) and adds cause IDs plus an
@@ -312,6 +313,7 @@ module top_module (
         .dmem_rsp_i (dmem_rsp),
         .msip_i     (msip),
         .mtip_i     (mtip),
+        .mtime_i    (mtime),
         .meip_i     (meip)
     );
 
@@ -909,7 +911,8 @@ module top_module (
         .clk_i (clk_core),
         .rstn_i(rstn_core),
         .axi   (axi_bus_timer.slave),
-        .mtip_o(mtip)
+        .mtip_o (mtip),
+        .mtime_o(mtime)
     );
 
     // -----------------------------------------------------------------

@@ -109,6 +109,9 @@ module rv32imac_zicsr_zifencei #(
     // write — SW clears it by writing mtimecmp > mtime, not by writing mip.
     input wire mtip_i,
 
+    // The CLINT's 64-bit mtime, read back through the time / timeh CSRs.
+    input wire [63:0] mtime_i,
+
     // Machine external-interrupt pending bit from the board-level peripheral
     // IRQ tree (currently the UART's level IRQ). Drives mip.MEIP. Read-only
     // from CSR write — SW clears it by servicing the peripheral.
@@ -230,6 +233,7 @@ module rv32imac_zicsr_zifencei #(
     wire [XLEN-1:0] ex_pc;
     wire [XLEN-1:0] ex_instr;
     wire            ex_valid;
+    wire            ex_commit;  // op_commits: this cycle (ex_valid is next cycle)
 
     // ===================================================================
     // Module instantiations
@@ -326,12 +330,13 @@ module rv32imac_zicsr_zifencei #(
         .msip_i        (msip_i),
         .mtip_i        (mtip_i),
         .meip_i        (meip_i),
+        .mtime_i       (mtime_i),
         .mtvec_o       (csr_mtvec),
         .mepc_o        (csr_mepc),
         .mstatus_o     (csr_mstatus),
         .mip_o         (csr_mip),
         .mie_o         (csr_mie),
-        .instr_retire_i(ex_valid)
+        .instr_retire_i(ex_commit)
     );
 
     // Trap unit (combinational peer of the execute stage): consumes the
@@ -446,7 +451,8 @@ module rv32imac_zicsr_zifencei #(
         .trap_pc_o           (trap_pc),
         .ex_pc_o             (ex_pc),
         .ex_instr_o          (ex_instr),
-        .ex_valid_o          (ex_valid)
+        .ex_valid_o          (ex_valid),
+        .commit_o            (ex_commit)
     );
 
     // Branch predictor (gshare PHT + GHR + RAS). Decode queries it for the

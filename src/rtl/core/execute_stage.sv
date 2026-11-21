@@ -164,7 +164,15 @@ module execute_stage #(
     // exposes a uniform pc / instr / valid output.
     output wire [XLEN-1:0] ex_pc_o,
     output wire [XLEN-1:0] ex_instr_o,
-    output wire            ex_valid_o
+    output wire            ex_valid_o,
+
+    // The instruction in execute commits THIS cycle (op_commits, i.e.
+    // ex_valid_o one cycle early). Feeds minstret, whose increment must land
+    // in the commit cycle: counted off the registered ex_valid_o it arrives a
+    // cycle late, so a csrr right after an instruction misses that
+    // instruction and a minstret write cannot suppress its own count
+    // (rv32mi-instret_overflow case 3).
+    output wire commit_o
 );
 
     // =================================================================
@@ -1252,6 +1260,7 @@ module execute_stage #(
     assign ex_pc_o       = ex_pc_q;
     assign ex_instr_o    = ex_instr_q;
     assign ex_valid_o    = ex_valid_q;
+    assign commit_o      = op_commits;
 
     // WFI halt next-state: set when WFI retires, cleared as soon as an
     // interrupt is pending+enabled. wfi_next_pc holds the return PC for the

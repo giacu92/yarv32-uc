@@ -4,9 +4,9 @@
  * failing check number at D-mem 0x2004 next to the 0xBAD marker.
  *
  * Checks:
- *   1  misa == 0x4000_2104 : RV32, I + M + C, and NOT A (bit 0). The core
- *      decodes every standard AMO/LR/SC as illegal, so misa must not
- *      advertise A.
+ *   1  misa == 0x4000_2105 on linux-soc: RV32 I + M + A + C (A implemented
+ *      2026-11-22). On `main` it is 0x4000_2104, because there the decoder
+ *      traps every standard AMO/LR/SC and misa must not advertise A.
  *   2  mcycle advances between two reads.
  *   3  cycle (0xC00) tracks mcycle: read back-to-back, within 16 cycles.
  *   4  instret counts exactly: two reads 10 nops apart differ by 11 (the
@@ -56,7 +56,7 @@ _start:
 
     /* ---- 1: misa ---- */
     csrr    a0, misa
-    CHECK   1, a0, 0x40002104
+    CHECK   1, a0, 0x40002105    /* linux-soc: A implemented */
 
     /* ---- 2: mcycle advances ---- */
     csrr    a0, mcycle

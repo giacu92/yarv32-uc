@@ -759,6 +759,8 @@ module decode_stage #(
     logic is_unscaled, is_scaled;
     logic size_ok_rv32;
     logic zilx_ok;
+    // A extension decode (2026-11-22): which of LR / SC / AMO this is.
+    logic is_lr, is_sc, is_amo;
 
     always_comb begin
         // ---- Source selection ----
@@ -913,8 +915,11 @@ module decode_stage #(
         exc_tval = '0;
         // Zilx helpers: assigned here so every opcode path drives them (no
         // latch). Only OPC_AMO below reads/overrides zilx_ok.
-        is_unscaled = (funct5 == 5'b10010);  // lx  (unscaled)
-        is_scaled = (funct5 == 5'b11010);  // lxs (scaled)
+        is_unscaled = (ZILX_EN != 0) && (funct5 == 5'b10010);  // lx  (unscaled)
+        is_scaled = (ZILX_EN != 0) && (funct5 == 5'b11010);  // lxs (scaled)
+        is_lr = 1'b0;
+        is_sc = 1'b0;
+        is_amo = 1'b0;
         size_ok_rv32 = (funct3 inside {3'b000, 3'b001, 3'b010, 3'b100, 3'b101});
         zilx_ok = 1'b0;
 
@@ -1190,6 +1195,38 @@ module decode_stage #(
                     end
                 end
                 // else: funct5=11110 (RV64) or real AMO -> illegal.
+
+                // A extension, RV32: funct3 = 010 (.W) only. aq/rl are
+                // accepted and need nothing: one hart, in-order, every access
+                // already globally ordered. LR.W needs rs2 = 0.
+                if (funct3 == 3'b010) begin
+                    unique case (funct5)
+                        5'b00010: is_lr = (rs2_field == 5'd0);  // LR.W
+                        5'b00011: is_sc = 1'b1;  // SC.W
+                        5'b00001, 5'b00000, 5'b00100, 5'b01100, 5'b01000, 5'b10000, 5'b10100,
+                            5'b11000, 5'b11100:
+                        is_amo = 1'b1;  // AMOSWAP/ADD/XOR/AND/OR/MIN/MAX/MINU/MAXU
+                        default: ;
+                    endcase
+                end
+                if (is_lr || is_sc || is_amo) begin
+                    // EA = rs1 (+ 0): the ALU computes it as an ADD with a
+                    // zero immediate, so the EA tap and alu_result agree
+                    // exactly as for a plain load (asserted in execute).
+                    dec_illegal  = 1'b0;
+                    reg_write    = 1'b1;  // rd <- old value (LR/AMO) or 0/1 (SC)
+                    mem_read     = is_lr | is_amo;
+                    mem_write    = is_sc | is_amo;
+                    mem_size     = MS_W;
+                    mem_unsigned = 1'b0;
+                    alu_op       = ALU_ADD;
+                    alu_src_a    = ALU_A_RS1;
+                    alu_src_b    = ALU_B_IMM;
+                    imm          = 32'd0;
+                    uses_rs1     = 1'b1;
+                    uses_rs2     = is_sc | is_amo;  // store data / AMO operand
+                    wb_src       = WB_MEM;
+                end
 
                 if (zilx_ok) begin
                     dec_illegal = 1'b0;
@@ -1580,7 +1617,11 @@ module decode_stage #(
         // reg_write / mem_read / mem_write / csr_wren are squashed by
         // illegal. A spanning stitch decodes a real 32-bit instr through
         // the uniform decoder, so spanning no longer forces illegal.
+        de_d.amo_funct5      = funct5;
         if (dec_illegal) begin
+            de_d.is_lr       = 1'b0;
+            de_d.is_sc       = 1'b0;
+            de_d.is_amo      = 1'b0;
             de_d.reg_write   = 1'b0;
             de_d.mem_read    = 1'b0;
             de_d.mem_write   = 1'b0;
@@ -1588,6 +1629,9 @@ module decode_stage #(
             de_d.branch_type = BR_NONE;
             de_d.illegal     = decoded_valid;  // illegal=1 only when a word was present
         end else begin
+            de_d.is_lr     = is_lr;
+            de_d.is_sc     = is_sc;
+            de_d.is_amo    = is_amo;
             de_d.reg_write = reg_write;
             de_d.mem_read  = mem_read;
             de_d.mem_write = mem_write;

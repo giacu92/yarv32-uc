@@ -89,14 +89,26 @@ static void print_array(const char *label)
  * zilx mnemonics: AMO opcode (0x2f), funct3=010 (word), funct5=11010
  * scaled-indexed mode, aq=rl=0 -> funct7 = 0b1101000 = 0x68.
  */
+/* QS_ZILX selects the encoding. It follows rv32_pkg::ZILX_EN: 1 on `main`
+ * (the core decodes Zilx), 0 on the Linux branch `linux-soc`, whose core
+ * gives the AMO opcode to the A extension and traps Zilx as illegal. With 0
+ * the same load is plain C, so the program and its Spike cosim still run.
+ */
+#ifndef QS_ZILX
+#define QS_ZILX 0
+#endif
 static inline int lxsw(volatile int *base, int idx)
 {
+#if QS_ZILX
     int val;
     __asm__ volatile (".insn r 0x2f, 0x2, 0x68, %0, %1, %2"
                        : "=r"(val)
                        : "r"(idx), "r"(base)
                        : "memory");
     return val;
+#else
+    return base[idx];
+#endif
 }
 
 /* Partition (Lomuto) over arr[lo..hi] with arr[hi] as pivot. */

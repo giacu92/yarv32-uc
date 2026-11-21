@@ -289,6 +289,44 @@ module execute_stage #(
     logic is_mem_op;
     assign is_mem_op = de_i.mem_read | de_i.mem_write;
 
+    // -----------------------------------------------------------------
+    // A extension (2026-11-22). Built ON the existing LSU rather than beside
+    // it, so the paths that close timing are untouched:
+    //   LR.W  : an ordinary load (live D-mem launch); its commit sets the
+    //           reservation {valid, word address}.
+    //   SC.W  : an ordinary captured store. Whether it succeeds is decided
+    //           from the live EA at CAPTURE time but lands in a flop
+    //           (sc_fail_q), so the live EA reaches no control signal -- the
+    //           rule the store capture exists for. A failing SC skips the
+    //           drive and retires from EX_MEM_LAUNCH with rd = 1.
+    //   AMO   : the load phase is an ordinary live load. On its response the
+    //           new value amo_op(old, rs2) is computed off the BSRAM output
+    //           and the rs2 flop into mem_wdata_q, old goes to amo_old_q, and
+    //           the op moves to EX_MEM_LAUNCH as a captured store (store
+    //           phase, amo_phase_q = 1). It retires on that store's accept
+    //           with rd = old.
+    // Atomics are D-mem only. An atomic whose EA selects the peri port takes
+    // an access fault (cause 5 for LR, 7 for SC/AMO) through the same
+    // no-launch -> EX_MEM_TRAP route as a misaligned access: a
+    // read-modify-write through the AXI bridge to a side-effecting slave is
+    // not something any supported software does, and refusing it keeps the
+    // bridge single-phase.
+    // Single hart, in-order, no DMA into the D-mem: nothing can intervene
+    // between the two phases, so atomicity needs no locking.
+    // -----------------------------------------------------------------
+    wire is_atomic = de_i.is_lr | de_i.is_sc | de_i.is_amo;
+    logic amo_phase_q;  // 0 = load phase (or not an AMO), 1 = store phase
+    // The direction of the CURRENT bus phase. Identical to mem_read /
+    // mem_write for every non-AMO op; an AMO reads first, then writes.
+    wire rd_phase = de_i.mem_read & ~(de_i.is_amo & amo_phase_q);
+    wire wr_phase = de_i.mem_write & ~(de_i.is_amo & ~amo_phase_q);
+    logic sc_fail_q;  // the SC being launched has no matching reservation
+    logic resv_valid_q;
+    logic [XLEN-1:2] resv_addr_q;
+    logic [XLEN-1:0] amo_old_q;  // AMO's loaded value, written back to rd
+    logic [XLEN-1:0] amo_new;  // amo_op(old, rs2), the store phase's data
+    logic amo_capture;  // the AMO's load response is here this cycle
+
     // A CSR op now takes two cycles: one to present the address to the
     // registered CSR read, one to retire with the data it returned.
     // de_i.csr_wren is decode's "CSR op present" flag and decode already
@@ -433,8 +471,13 @@ module execute_stage #(
         endcase
     endfunction
 
-    wire mem_misaligned_live = misaligned_of(lsu_ea);
-    wire mem_misaligned_q = misaligned_of(mem_addr_q);
+    // An atomic aimed at the peri port is refused exactly like a misaligned
+    // access: never launched, trap one cycle later off the REGISTERED address.
+    wire mem_misaligned_live = misaligned_of(lsu_ea) | (is_atomic & is_peri_live);
+    wire mem_misaligned_q = misaligned_of(mem_addr_q) | (is_atomic & mem_is_peri_q);
+    // Which of the two refusals it was, for mcause (registered, read only in
+    // the trap cycle).
+    wire mem_bad_is_access = ~misaligned_of(mem_addr_q);
 
     wire mem_misaligned_launch = (LSU_LIVE_LOAD != 0) & mem_req_pending & mem_misaligned_live;
 
@@ -480,7 +523,7 @@ module execute_stage #(
     // LSU_LIVE_LOAD=0 collapses the fork: nothing launches live, everything
     // captures, and this is the pre-2026-09-01 LSU.
     wire dmem_load_drive = (LSU_LIVE_LOAD != 0) &
-        mem_req_pending & ~mem_misaligned_live & ~is_peri_live & de_i.mem_read;
+        mem_req_pending & ~mem_misaligned_live & ~is_peri_live & rd_phase;
     wire mem_capture = mem_req_pending & ~dmem_load_drive & ~mem_misaligned_launch;
     wire mem_launch_state = (ex_state_q == EX_MEM_LAUNCH);
 
@@ -494,7 +537,10 @@ module execute_stage #(
     // mispredict is 0, and every trap/mret/interrupt trigger requires
     // EX_IDLE), so the term is unreachable today; it is here because the cost
     // is one AND and the failure it prevents is silent memory corruption.
-    wire captured_drive = mem_launch_state & de_i.valid & ~misaligned_trap;
+    // A failing SC.W is captured like any store but never drives: sc_fail_q
+    // is a flop, so this stays flop-derived.
+    wire sc_skip = mem_launch_state & de_i.is_sc & sc_fail_q;
+    wire captured_drive = mem_launch_state & de_i.valid & ~misaligned_trap & ~sc_skip;
     // The captured D-mem launch carries STORES only when LSU_LIVE_LOAD=1 (an
     // aligned D-mem load goes live and never reaches this state); it carries
     // BOTH directions when LSU_LIVE_LOAD=0. So the write enable must come from
@@ -505,7 +551,7 @@ module execute_stage #(
     // Harvard oracle; had the access completed it would have been silent D-mem
     // corruption instead.
     wire dmem_captured_drive = captured_drive & ~is_peri_rsp;
-    wire dmem_store_we = dmem_captured_drive & de_i.mem_write;
+    wire dmem_store_we = dmem_captured_drive & wr_phase;
 
     // Any launch is driving a bus this cycle. No RTL consumer -- this is the
     // tap the sim's stall histogram reads (sim_main.cpp, `lsu-launch`).
@@ -535,19 +581,21 @@ module execute_stage #(
     // wready. No term of it descends from the live EA, which is the whole
     // point (see the fork above).
     logic store_done;
-    assign store_done = captured_hs & de_i.mem_write;
+    assign store_done = (captured_hs & wr_phase) | sc_skip;
 
     // Unified mem-op retire pulse: rvalid cycle for loads, launch-accept
     // cycle for (posted) stores.
+    // An AMO's load response is NOT its retire: it goes on to the store
+    // phase, and retires on that store's accept.
     logic mem_op_done;
-    assign mem_op_done = de_i.mem_read ? mem_done : store_done;
+    assign mem_op_done = rd_phase ? (mem_done & ~de_i.is_amo) : store_done;
 
     logic div_running;
     assign div_running = (ex_state_q == EX_DIV_BUSY) & ~alu_result_valid;
     // Stall the launch + busy/wait cycles; the done cycle drops the stall
     // so decode advances (mem_running falls away the cycle mem_done=1).
     logic mem_running;
-    assign mem_running = (ex_state_q == EX_MEM_WAIT) & ~mem_done;
+    assign mem_running = (ex_state_q == EX_MEM_WAIT) & ~(mem_done & ~de_i.is_amo);
     // A pending mem op stalls decode unless it is a store that got its accept
     // this cycle (posted -> retires now). EX_MEM_TRAP holds de_i for the
     // misaligned trap that fires from it.
@@ -586,10 +634,12 @@ module execute_stage #(
             // trap without ever driving.
             if (misaligned_trap)
                 ex_state_d = EX_IDLE;
-            else if (captured_hs) ex_state_d = de_i.mem_read ? EX_MEM_WAIT : EX_IDLE;
+            else if (sc_skip) ex_state_d = EX_IDLE;  // failed SC retires undriven
+            else if (captured_hs) ex_state_d = rd_phase ? EX_MEM_WAIT : EX_IDLE;
             EX_MEM_TRAP: ex_state_d = EX_IDLE;  // trap raised this cycle
             EX_DIV_BUSY: if (alu_result_valid) ex_state_d = EX_IDLE;
-            EX_MEM_WAIT: if (mem_done) ex_state_d = EX_IDLE;
+            // An AMO's load response moves it to its store phase.
+            EX_MEM_WAIT: if (mem_done) ex_state_d = de_i.is_amo ? EX_MEM_LAUNCH : EX_IDLE;
             default: ex_state_d = EX_IDLE;
         endcase
     end
@@ -689,8 +739,9 @@ module execute_stage #(
     // CSR trap-write bundle. misaligned_trap (the EX_MEM_TRAP state, not the
     // live mem_misaligned) selects, so an exception in EX_IDLE — where
     // mem_addr_q is stale — reads its own cause/tval.
-    wire [XLEN-1:0] sync_cause = misaligned_trap ?
-        (de_i.mem_write ? MCAUSE_SAD_MIS : MCAUSE_LAD_MIS) : de_i.exception_cause;
+    wire [XLEN-1:0] sync_cause = !misaligned_trap ? de_i.exception_cause :
+        mem_bad_is_access ? (de_i.mem_write ? MCAUSE_SAD_ACC : MCAUSE_LAD_ACC) :
+        (de_i.mem_write ? MCAUSE_SAD_MIS : MCAUSE_LAD_MIS);
     wire [XLEN-1:0] sync_tval = misaligned_trap ? mem_addr_q : de_i.exception_tval;
     wire [XLEN-1:0] trap_cause = take_interrupt ? int_cause_i : sync_cause;
     wire [XLEN-1:0] trap_tval = take_interrupt ? 32'd0 : sync_tval;
@@ -783,9 +834,12 @@ module execute_stage #(
     logic [XLEN-1:0] wb_early;
     always_comb begin
         unique case (de_i.wb_src)
-            WB_PC4:  wb_early = pc_link;
-            WB_MEM:  wb_early = load_data;
-            WB_CSR:  wb_early = csr_rdata_i;  // rd <- old CSR value
+            WB_PC4: wb_early = pc_link;
+            // LR / plain loads: the response. AMO: the old value it latched
+            // before its store phase. SC: 0 on success, 1 on failure.
+            WB_MEM:
+            wb_early = de_i.is_amo ? amo_old_q : de_i.is_sc ? {31'd0, sc_fail_q} : load_data;
+            WB_CSR: wb_early = csr_rdata_i;  // rd <- old CSR value
             default: wb_early = '0;  // includes WB_ALU (unused here)
         endcase
     end
@@ -910,6 +964,54 @@ module execute_stage #(
             mem_wdata_q   <= store_wdata;
             mem_wstrb_q   <= store_wstrb;
             mem_is_peri_q <= lsu_ea[PERI_ADDR_BIT];
+        end else if (amo_capture) begin
+            // AMO store phase: same word, full strobes, the new value.
+            mem_wdata_q <= amo_new;
+            mem_wstrb_q <= '1;
+        end
+    end
+
+    // AMO operation, on the loaded word and rs2. Inputs are the BSRAM's
+    // registered output and a D/E flop, and the result ends at mem_wdata_q,
+    // so this is a flop-to-flop path that never touches alu_result.
+    wire [XLEN-1:0] amo_mem = lsu_rsp_wait.rdata;
+    wire [XLEN-1:0] amo_src = de_i.rs2_data;
+    wire amo_lt_s = $signed(amo_mem) < $signed(amo_src);
+    wire amo_lt_u = amo_mem < amo_src;
+    always_comb begin
+        unique case (de_i.amo_funct5)
+            5'b00001: amo_new = amo_src;  // AMOSWAP
+            5'b00000: amo_new = amo_mem + amo_src;  // AMOADD
+            5'b00100: amo_new = amo_mem ^ amo_src;  // AMOXOR
+            5'b01100: amo_new = amo_mem & amo_src;  // AMOAND
+            5'b01000: amo_new = amo_mem | amo_src;  // AMOOR
+            5'b10000: amo_new = amo_lt_s ? amo_mem : amo_src;  // AMOMIN
+            5'b10100: amo_new = amo_lt_s ? amo_src : amo_mem;  // AMOMAX
+            5'b11000: amo_new = amo_lt_u ? amo_mem : amo_src;  // AMOMINU
+            5'b11100: amo_new = amo_lt_u ? amo_src : amo_mem;  // AMOMAXU
+            default:  amo_new = amo_src;
+        endcase
+    end
+
+    // The AMO's load response: capture the new value for the store phase.
+    assign amo_capture = (ex_state_q == EX_MEM_WAIT) & mem_done & de_i.is_amo;
+
+    // AMO phase and SC outcome. The SC's pass/fail is decided at capture
+    // (EX_IDLE, live EA) into a flop; the reservation it compares against is
+    // maintained next to op_commits further down.
+    always_ff @(posedge clk_i) begin
+        if (!rstn_i) begin
+            amo_phase_q <= 1'b0;
+            sc_fail_q   <= 1'b1;
+            amo_old_q   <= '0;
+        end else begin
+            if (amo_capture) begin
+                amo_phase_q <= 1'b1;
+                amo_old_q   <= amo_mem;
+            end else if (store_done) amo_phase_q <= 1'b0;
+
+            if (mem_req_pending & de_i.is_sc)
+                sc_fail_q <= ~(resv_valid_q & (resv_addr_q == lsu_ea[XLEN-1:2]));
         end
     end
 
@@ -922,7 +1024,7 @@ module execute_stage #(
             assert (!mem_rsp_i.rvalid)
             else $fatal(1, "load response in the accept cycle: registered request is stale");
         end
-        if (rstn_i && captured_hs && de_i.mem_read) begin
+        if (rstn_i && captured_hs && rd_phase) begin
             assert (!lsu_rsp_wait.rvalid)
             else $fatal(1, "captured load response in the accept cycle: request is stale");
         end
@@ -1108,7 +1210,7 @@ module execute_stage #(
             // shape of mixed-lifetime bundle that cost a board bring-up here
             // (see the note above). One AND buys the invariant back.
             peri_req_o.wvalid = captured_drive;
-            peri_req_o.we     = captured_drive & de_i.mem_write;
+            peri_req_o.we     = captured_drive & wr_phase;
             peri_req_o.addr   = mem_addr_q;  // registered EA
             peri_req_o.wdata  = mem_wdata_q;
             peri_req_o.wstrb  = mem_wstrb_q;
@@ -1122,7 +1224,7 @@ module execute_stage #(
 
         // Read-data phase: steered by the registered target bit, as the
         // outstanding read's address was latched a cycle or more ago.
-        if ((ex_state_q == EX_MEM_WAIT) & de_i.mem_read) begin
+        if ((ex_state_q == EX_MEM_WAIT) & rd_phase) begin
             if (is_peri_rsp) peri_req_o.rready = 1'b1;
             else mem_req_o.rready = 1'b1;
         end
@@ -1251,16 +1353,31 @@ module execute_stage #(
     // misaligned_trap is itself a term of sync_trap_req. Both are asserted
     // below under `ifdef VERILATOR rather than assumed.
     logic op_commits;
-    assign op_commits    = mret_req | (de_i.valid & ~freeze & result_ready & ~trap_redirect_req);
+    assign op_commits = mret_req | (de_i.valid & ~freeze & result_ready & ~trap_redirect_req);
 
-    assign ex_pc_d       = op_commits ? de_i.pc : ex_pc_q;
-    assign ex_instr_d    = op_commits ? de_i.instr : ex_instr_q;
-    assign ex_valid_d    = op_commits;
+    assign ex_pc_d    = op_commits ? de_i.pc : ex_pc_q;
+    assign ex_instr_d = op_commits ? de_i.instr : ex_instr_q;
+    assign ex_valid_d = op_commits;
 
-    assign ex_pc_o       = ex_pc_q;
-    assign ex_instr_o    = ex_instr_q;
-    assign ex_valid_o    = ex_valid_q;
-    assign commit_o      = op_commits;
+    assign ex_pc_o    = ex_pc_q;
+    assign ex_instr_o = ex_instr_q;
+    assign ex_valid_o = ex_valid_q;
+    assign commit_o   = op_commits;
+
+    // Reservation (LR/SC). Set by an LR's commit, cleared by any SC's commit
+    // and by every trap / interrupt / mret, so an SC can never succeed across
+    // a context change.
+    always_ff @(posedge clk_i) begin
+        if (!rstn_i) begin
+            resv_valid_q <= 1'b0;
+            resv_addr_q  <= '0;
+        end else if (trap_redirect_req) resv_valid_q <= 1'b0;
+        else if (op_commits & de_i.is_sc) resv_valid_q <= 1'b0;
+        else if (op_commits & de_i.is_lr) begin
+            resv_valid_q <= 1'b1;
+            resv_addr_q  <= mem_addr_q[XLEN-1:2];
+        end
+    end
 
     // WFI halt next-state: set when WFI retires, cleared as soon as an
     // interrupt is pending+enabled. wfi_next_pc holds the return PC for the

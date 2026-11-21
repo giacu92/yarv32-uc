@@ -24,10 +24,10 @@
 #   rv32um  M extension                      -- enabled
 #   rv32uc  compressed                       -- enabled
 #   rv32mi  machine-mode traps/CSRs          -- enabled
-#   rv32ua  atomics       -- NOT RUNNABLE. This core has no A extension: the
-#           AMO major opcode is taken by the custom Zilx indexed load
-#           (decode_stage.sv), and every real AMO encoding decodes to illegal.
-#           Building these would measure a deliberate design choice, not a bug.
+#   rv32ua  atomics       -- enabled on linux-soc (2026-11-22), which
+#           implements LR/SC + AMOs and turns Zilx off. On `main` the AMO
+#           opcode is Zilx's and every real AMO is illegal, so it stays off
+#           there.
 #   rv32si  supervisor    -- NOT RUNNABLE. M-mode only, no delegation, no MMU.
 #   rv32uf/ud/uzb*/up     -- NOT RUNNABLE. No F/D, no bitmanip, no packed SIMD.
 #
@@ -36,7 +36,7 @@
 # expected failures in sim/Makefile's `compliance` target, not skipped here,
 # so a change in their status is visible instead of hidden.
 
-SUITES ?= rv32ui rv32um rv32uc rv32mi
+SUITES ?= rv32ui rv32um rv32ua rv32uc rv32mi
 
 # One entry per test, "suite/name", discovered from the vendored tree so a
 # suite gaining a test upstream is picked up by re-vendoring alone.

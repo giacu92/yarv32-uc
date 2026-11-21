@@ -107,6 +107,14 @@ package rv32_pkg;
     // 50 MHz at +0.093 ns and ran CoreMark on silicon. See execute_stage.sv.
     localparam int unsigned LSU_LIVE_LOAD = 1;
 
+    // Zilx (custom indexed loads under the standard AMO major opcode). 1 on
+    // `main`, where firmware may use it; 0 on the Linux branch (`linux-soc`),
+    // where no toolchain emits it and the opcode belongs to the A extension.
+    // The encodings do not collide (Zilx funct5 10010 / 11010 are unused by
+    // A, Zabha and Zacas), so this is a scope decision, not a decode
+    // conflict. Decided 2026-11-22 (docs/linux_progress.md).
+    localparam int unsigned ZILX_EN = 0;
+
     // ---------------------------------------------------------------
     // Branch-predictor geometry. One place, because three files have to
     // agree: branch_predictor.sv sizes the PHT/GHR from it, and the
@@ -538,7 +546,9 @@ package rv32_pkg;
     localparam logic [XLEN-1:0] MCAUSE_ILLEGAL = 32'h0000_0002;  // illegal instruction
     localparam logic [XLEN-1:0] MCAUSE_BREAKPOINT = 32'h0000_0003;  // ebreak
     localparam logic [XLEN-1:0] MCAUSE_LAD_MIS = 32'h0000_0004;  // load addr misaligned
+    localparam logic [XLEN-1:0] MCAUSE_LAD_ACC = 32'h0000_0005;  // load access fault
     localparam logic [XLEN-1:0] MCAUSE_SAD_MIS = 32'h0000_0006;  // store/AMO addr misaligned
+    localparam logic [XLEN-1:0] MCAUSE_SAD_ACC = 32'h0000_0007;  // store/AMO access fault
     localparam logic [XLEN-1:0] MCAUSE_ECALL_M = 32'h0000_000B;  // env call from M-mode (11)
     localparam logic [XLEN-1:0] MCAUSE_MSI = 32'h8000_0003;  // machine software interrupt
     localparam logic [XLEN-1:0] MCAUSE_MTI = 32'h8000_0007;  // machine timer interrupt
@@ -615,6 +625,16 @@ package rv32_pkg;
         mem_size_t mem_size;
         logic mem_unsigned;  // load zero-extend (LBU/LHU)
         logic [1:0] mem_shamt;  // Zilx index scale (0 unscaled, log2 size scaled)
+        // A extension (2026-11-22). At most one of the three is set, and only
+        // together with the mem_read / mem_write that describe the access:
+        //   lr  : mem_read            -- a load that sets the reservation
+        //   sc  : mem_write, rd write -- a store that may be skipped; rd = 0/1
+        //   amo : mem_read+mem_write  -- load phase, then a store phase of
+        //                                amo_funct5(old, rs2); rd = old
+        logic is_lr;
+        logic is_sc;
+        logic is_amo;
+        logic [4:0] amo_funct5;  // instr[31:27], selects the AMO operation
         wb_src_t wb_src;
         branch_t branch_type;
         sys_op_t sys_op;  // OPC_SYSTEM funct3=0 / fence ops

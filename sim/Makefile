@@ -116,6 +116,7 @@ REGRESS_TESTS := \
 	quicksort:quicksort/build:400000:trace:x10=600d \
 	bp_pred:isa/bp_pred/build:20000:probe@0x2000=600d \
 	mul_ops:isa/mul_ops/build:20000:probe@0x2000=600d \
+	csr_ops:isa/csr_ops/build:20000:probe@0x2000=600d \
 	div_ops:isa/div_ops/build:20000:probe@0x2000=600d \
 	rvc_scramble:isa/rvc_scramble/build:20000:probe@0x2000=600d \
 	span_target:isa/span_target/build:20000:probe@0x2000=600d \

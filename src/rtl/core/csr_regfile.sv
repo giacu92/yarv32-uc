@@ -96,11 +96,17 @@ module csr_regfile (
     logic [XLEN-1:0] regs[NCSR-1:0];
     logic [XLEN-1:0] csr_rdata;
 
-    // Architected reset values (M-mode). misa = RV32 I/M/A/C:
-    //   MXL[31:30]=1 (RV32), A=bit0, C=bit2, I=bit8, M=bit13.
+    // Architected reset values (M-mode). misa = RV32 I/M/C:
+    //   MXL[31:30]=1 (RV32), C=bit2, I=bit8, M=bit13.
+    // A (bit 0) is deliberately CLEAR: this core decodes every standard AMO /
+    // LR / SC as illegal (decode_stage.sv, OPC_AMO carries only Zilx), so
+    // advertising A would invite software that trusts misa -- a Linux kernel
+    // or OpenSBI -- to execute instructions that trap. Until 2026-11-22 this
+    // read 0x4000_2105, i.e. it claimed A. Set bit 0 again only together with
+    // a real A implementation. Guarded by sw/isa/csr_ops.
     // mstatus resets with MPP = 2'b11 (M): only M-mode is implemented, so
     // MPP is effectively read-only 11 (see MSTATUS_RESET in rv32_pkg).
-    localparam logic [XLEN-1:0] MISA_RESET = 32'h4000_2105;
+    localparam logic [XLEN-1:0] MISA_RESET = 32'h4000_2104;
 
     always_comb begin
         case (csr_addr_i)
@@ -126,7 +132,7 @@ module csr_regfile (
                 if (i == 0) begin
                     regs[i] <= MSTATUS_RESET;  // MPP = 2'b11 (M), MIE = MPIE = 0
                 end else if (i == 1) begin
-                    regs[i] <= MISA_RESET;  // misa is read-only WARL, so reset to RV32IMAC
+                    regs[i] <= MISA_RESET;  // misa is read-only WARL, so reset to RV32IMC
                 end else begin
                     regs[i] <= '0;
                 end

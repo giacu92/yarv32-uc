@@ -65,3 +65,4 @@ sim/sim_uart_tx.txt
 
 # RTL retire-trace dumps (sim_main debug output, regenerable)
 sim/.*.trace
+impl/runs/

@@ -559,17 +559,29 @@ package rv32_pkg;
 
 
     typedef enum logic [11:0] {
-        CSR_ADDR_MSTATUS  = 12'h300,
-        CSR_ADDR_MISA     = 12'h301,
-        CSR_ADDR_MIE      = 12'h304,
-        CSR_ADDR_MTVEC    = 12'h305,
-        CSR_ADDR_MSCRATCH = 12'h340,
-        CSR_ADDR_MEPC     = 12'h341,
-        CSR_ADDR_MCAUSE   = 12'h342,
-        CSR_ADDR_MTVAL    = 12'h343,
-        CSR_ADDR_MIP      = 12'h344,
-        CSR_ADDR_MCYCLE   = 12'hB00,
-        CSR_ADDR_MINSTRET = 12'hB02
+        CSR_ADDR_MSTATUS   = 12'h300,
+        CSR_ADDR_MISA      = 12'h301,
+        CSR_ADDR_MIE       = 12'h304,
+        CSR_ADDR_MTVEC     = 12'h305,
+        CSR_ADDR_MSCRATCH  = 12'h340,
+        CSR_ADDR_MEPC      = 12'h341,
+        CSR_ADDR_MCAUSE    = 12'h342,
+        CSR_ADDR_MTVAL     = 12'h343,
+        CSR_ADDR_MIP       = 12'h344,
+        CSR_ADDR_MCYCLE    = 12'hB00,
+        CSR_ADDR_MINSTRET  = 12'hB02,
+        // Upper halves of the 64-bit machine counters (RV32 only).
+        CSR_ADDR_MCYCLEH   = 12'hB80,
+        CSR_ADDR_MINSTRETH = 12'hB82,
+        // Zicntr unprivileged read-only shadows. cycle/instret mirror
+        // mcycle/minstret; time mirrors the CLINT's mtime (clint_timer
+        // mtime_o -> CPU mtime_i), not a counter of its own.
+        CSR_ADDR_CYCLE     = 12'hC00,
+        CSR_ADDR_TIME      = 12'hC01,
+        CSR_ADDR_INSTRET   = 12'hC02,
+        CSR_ADDR_CYCLEH    = 12'hC80,
+        CSR_ADDR_TIMEH     = 12'hC81,
+        CSR_ADDR_INSTRETH  = 12'hC82
     } csr_addr_t;
 
     // D/E pipeline register: everything decode produces for a (future)

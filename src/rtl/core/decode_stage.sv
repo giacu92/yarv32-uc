@@ -77,7 +77,8 @@ import rv32_pkg::*;
  *
  * Opcodes that decode to illegal=1 (execute raises the illegal-instruction
  * trap): real atomics and RV64-only Zilx encodings under OPC_AMO, reserved
- * funct3 values, sfence.vma (no VM), and any unknown opcode. OPC_MISC_MEM
+ * funct3 values, sfence.vma (no VM), a CSR access to an unimplemented
+ * address or a write to a read-only one, and any unknown opcode. OPC_MISC_MEM
  * (fence / fence.i) and OPC_SYSTEM funct3=0 (ecall / ebreak / mret / wfi) are
  * decoded and retired -- they ride sys_op to execute.
  *
@@ -651,6 +652,28 @@ module decode_stage #(
     logic [4:0] rs1_addr_dec;
     logic [4:0] rs2_addr_dec;
     logic [11:0] csr_addr_dec;
+
+    // CSR addresses this core implements (csr_regfile.sv), plus the
+    // mandatory machine information registers, which read 0 here:
+    // mvendorid / marchid / mimpid / mhartid / mconfigptr (0xF11..0xF15)
+    // and RV32's mstatush (0x310, no MBE/SBE/MPV fields on this core).
+    // tselect / tdata1..3 (0x7A0..0x7A3) also read 0 and ignore writes: that
+    // is the Sdtrig answer "no trigger at this index" (tdata1.type = 0), the
+    // form upstream riscv-tests (rv32mi-breakpoint) and OpenSBI's trigger
+    // probe expect, rather than a trap. Anything else traps as an illegal
+    // instruction.
+    function automatic logic csr_addr_known(input logic [11:0] a);
+        unique case (a)
+            CSR_ADDR_MSTATUS, CSR_ADDR_MISA, CSR_ADDR_MIE, CSR_ADDR_MTVEC, CSR_ADDR_MSCRATCH,
+                CSR_ADDR_MEPC, CSR_ADDR_MCAUSE, CSR_ADDR_MTVAL, CSR_ADDR_MIP, CSR_ADDR_MCYCLE,
+                CSR_ADDR_MINSTRET, CSR_ADDR_MCYCLEH, CSR_ADDR_MINSTRETH, CSR_ADDR_CYCLE,
+                CSR_ADDR_TIME, CSR_ADDR_INSTRET, CSR_ADDR_CYCLEH, CSR_ADDR_TIMEH, CSR_ADDR_INSTRETH,
+                12'h310, 12'hF11, 12'hF12, 12'hF13, 12'hF14, 12'hF15, 12'h7A0, 12'h7A1, 12'h7A2,
+                12'h7A3:
+            return 1'b1;
+            default: return 1'b0;
+        endcase
+    endfunction
 
     // ---- Field extraction ----
     logic [6:0] opcode;
@@ -1239,6 +1262,23 @@ module decode_stage #(
                         end
                         default: dec_illegal = 1'b1;  // unreachable (is_csr => funct3!=0)
                     endcase
+                    // Illegal-CSR trap (2026-11-22). An address this core
+                    // does not implement, or a WRITE to a read-only address
+                    // (csr[11:10] == 2'b11), is an illegal instruction rather
+                    // than a silent read-0 / write-ignore. Software probes
+                    // features this way (OpenSBI emulates rdtime and detects
+                    // PMP/trigger CSRs from the trap), so a silent 0 lies.
+                    // CSRRS/CSRRC with rs1 = x0 and their immediate forms with
+                    // zimm = 0 do not write (priv. spec), so they may read a
+                    // read-only CSR. The address set is decoded from the
+                    // instruction word only (funct12, funct3, rs1 field), so
+                    // it is a flop-to-flop term into de_d.illegal / exception,
+                    // never on the operand or forwarding path.
+                    if (!csr_addr_known(
+                            funct12
+                        ) || (funct12[11:10] == 2'b11 &&
+                              (funct3[1:0] == 2'b01 || rs1_field != 5'd0)))
+                        dec_illegal = 1'b1;
                 end else begin
                     // Trap-entry / return / halt ops (funct3 == 0). Retire
                     // with side effects handled in execute (redirect + CSR

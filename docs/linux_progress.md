@@ -84,8 +84,11 @@ RTL diverge — read `impl/runs/<tag>/pht_primitives.txt`.
 - yosys estimate of the cache subproject's `fpga_top`: **~34.8k logic cells**,
   1739 FF, 36 BSRAM (single-port SPX9). The M4 diagnosis starts from this.
 - CoreMark GCC 14.3.0, 10 iterations, sim: **4 134 117 ticks = 413 411
-  cycles/iteration = 2.41 CM/MHz** (not a valid run: too short). 2000-iteration
-  sim: see below.
+  cycles/iteration = 2.41 CM/MHz** (not a valid run: too short).
+- **CoreMark GCC 14.3.0, 2000 iterations, sim on `main` `b96a49b`: 824 488 511
+  ticks = 412 244 cycles/iteration = 2.42 CM/MHz, `crcfinal = 0x4983`,
+  "Correct operation validated"**; predictor 91.97% accuracy, 15.30 MPKI.
+  This is the number NG-2's board run must reproduce exactly.
 
 **Blocked (NG-1, NG-2):** PnR of `main`, the GowinSynthesis resource table,
 the `.vg` PHT grep, and the board run of the 14.3.0 image.
@@ -127,3 +130,100 @@ three commands are queued there.
 
 **Remaining:** PnR ×(1 + confirmation) for each of the three commits (NG-1).
 The owner reviews and merges `main-fixes`.
+
+---
+
+## M2 — A extension (`linux-soc`)
+
+**Done 2026-11-22**, commit `b6373b6`.
+
+- LR.W / SC.W / nine AMO*.W, built on the existing LSU (details in the
+  commit and in `execute_stage.sv`). Atomics to the peri port take access
+  fault 5/7. Reservation cleared on every SC and every trap/interrupt/mret.
+  `misa` = 0x4000_2105 on this branch.
+- `ZILX_EN = 0` on `linux-soc` (D11). quicksort's hand-encoded `lxs.w`
+  falls back to plain C (`QS_ZILX`).
+
+**Measured:** `make regress` 23/23 (new `isa/amo_ops`, 29 checks, and
+`amo_stress`, 600 random atomics vs a C shadow); `make compliance` 73 pass /
+4 XFAIL / 0 fail with `rv32ua` enabled (10/10); Spike cosim `amo_stress`
+PASS 62 581 retires, quicksort PASS 33 589 (no-Zilx build), ecall PASS 17;
+CoreMark 10-iteration ticks 4 134 117 (unchanged). PnR pending (NG-1).
+
+**Mutation checks:** AMOMIN signed→unsigned, SC ignoring the address, and
+the reservation surviving a trap each FAIL `amo_ops`. One mutant survives:
+writing back the load data instead of `amo_old_q`. `native_ram` holds its
+read output during the store phase, so the two are equivalent on BSRAM. The
+flop stays because a cache's output will not hold. This is a known blind
+spot of the oracle on BSRAM, not a bug.
+
+| # | Decision | Reasoning |
+|---|---|---|
+| D11 | Zilx behind `rv32_pkg::ZILX_EN`, 0 on `linux-soc` | Owner's instruction. The encodings do not collide with A, so a parameter costs nothing and `main` keeps Zilx |
+| D12 | Atomics to the peri port raise an access fault instead of being executed through the AXI bridge | A read-modify-write through the single-phase bridge to a side-effecting slave is not used by any supported software. Refusing it keeps the bridge unchanged. This is the conservative option |
+| D13 | aq/rl bits accepted and ignored | One hart, in-order, every access already globally ordered |
+
+---
+
+## M3 — Variable-latency tolerance (`linux-soc`)
+
+**Done 2026-11-22** (sim). PnR pending (NG-1).
+
+- `fetch_stage.sv`: the single in-flight PC register became a depth-2 FIFO
+  (`req_pc_q` oldest, `req_pc2_q` younger). `issue_addr` stays on the last
+  2:1 into `req_pc_q`, an endpoint of the frozen worst path.
+- `sim/mem_fuzz.sv`: a latency-fuzz shim between each CPU port and its
+  `native_ram`. With `+MEM_FUZZ=<seed>` it refuses ~25% of accepts, caps
+  outstanding reads at the port's depth, and delays each response by 0–7
+  extra cycles in order. Without the plusarg it is pure wires.
+- `sim/Makefile`: `REGRESS_ARGS`, `REGRESS_CYC_MULT`, and the
+  `regress-fuzz` target (seeds 1 2 3, MAX_CYC × 8).
+
+**Bug found in review, fixed before use as the gate (2026-11-22).** The
+first `regress-fuzz` piped `$(MAKE) regress | tail -1 || rc=1`. The `||`
+then saw `tail`'s exit status, so a failing regress could never set `rc`
+and the target always passed. The owner spotted it. Fix: capture make's
+status into `rc` before trimming the output
+(`out=$$($(MAKE) ... 2>&1) || rc=1; echo "$$out" | tail -1`).
+**Proven able to fail:** `make regress-fuzz FUZZ_SEEDS=1 FUZZ_CYC_MULT=1`
+(cycle bounds too small for a fuzzed memory) reports `guitar_tuner FAIL`
+and exits **2**. Only after that was it used as the M3 gate.
+
+**Measured:**
+- `make regress-fuzz` (seeds 1 2 3, MAX_CYC × 8): **23/23 on every seed**, exit 0.
+- Fuzz off: every regress cycle count is **identical** to the pre-M3 tree
+  (diff of the PASS lines empty), so M3 costs zero cycles on BSRAM.
+- Mutant (FIFO reverted to the single register): under `+MEM_FUZZ=1`,
+  quicksort, bp_pred, csr_ops, amo_ops, amo_stress, div_ops, rvc_scramble,
+  span_target and more FAIL. So the fuzz really does put two reads in
+  flight, and the FIFO is what makes them correct.
+- LSU: no change was needed. Every D-mem path is already handshake-driven,
+  and the whole set passes with random accept refusal and 0–7 cycles of
+  response delay.
+
+---
+
+## Session state at stop (2026-11-22, owner asked to stop for the day)
+
+**Branches:**
+- `main-fixes` @ `caf1d6d` — M1a/M1b/M1c + CLAUDE.md. Ready for review
+  once PnR runs (NG-1).
+- `linux-soc` — docs, M1 merge, M2 (`b6373b6`), M3 (this commit).
+- Cache subproject (`src/sub/yarv32-native-caches`, its own git repo):
+  branch `m4-resource` created at `8f67d78` by the parallel M4 agent,
+  **no commits**. The agent was stopped before its per-module yosys
+  breakdown finished. What it confirmed: baseline `make sim` passes,
+  `make bist` PASS, format clean; `iverilog` is not installed, so
+  `make gatesim` cannot run on this machine.
+
+**Resume here:** M4 step 1, the per-module cell breakdown of the cache's
+`fpga_top` (yosys, non-flattened `stat`), then §6.1 budget → §6.2 option
+choice → implementation on `m4-resource`. After that: M5 (Linux SoC top),
+M6 (SDRAM bursts, ≤ 20-cycle clean miss), M7 (`fence.i`), M8 (standard
+peripherals), M9 (loader), M10 (nommu boot), then the §6.3 review.
+
+**Still blocked:** NG-1 (Gowin host unreachable: every PnR checkpoint) and
+NG-2 (board CoreMark run of the 14.3.0 image).
+
+Also done this session: Python allowlisted for Bash in
+`.claude/settings.local.json` (gitignored, local only).

@@ -118,29 +118,38 @@ module sim_top #(
     // -----------------------------------------------------------------
     // Fetch I-mem port is 64-bit read-only (ifetch); the LSU D-mem port stays
     // on the 32-bit byte-strobed mem_req_t / mem_rsp_t.
-    ifetch_req_t        imem_req;
-    ifetch_rsp_t        imem_rsp;
-    mem_req_t           dmem_req;
-    mem_rsp_t           dmem_rsp;
+    ifetch_req_t imem_req;
+    ifetch_rsp_t imem_rsp;
+    mem_req_t    dmem_req;
+    mem_rsp_t    dmem_rsp;
     // The read-only I-mem holds BVALID low (no write-ack); sink it so the
     // port is connected (a native_ram write-ack only exists for the D-mem).
-    wire                imem_bvalid_unused;
+    wire         imem_bvalid_unused;
+
+    // Latency-fuzz shims (mem_fuzz.sv) between the CPU ports and the RAMs.
+    // Pure wires unless +MEM_FUZZ=<seed> is given.
+    wire im_s_valid, im_s_rready, im_s_wready, im_s_rvalid;
+    wire [31:0] im_s_addr;
+    wire [63:0] im_s_rdata;
+    wire dm_s_valid, dm_s_we, dm_s_rready, dm_s_wready, dm_s_rvalid;
+    wire [31:0] dm_s_addr, dm_s_wdata, dm_s_rdata;
+    wire [ 3:0] dm_s_wstrb;
 
     // Interrupt pending bits (mip.MSIP / mip.MTIP sources).
-    wire                msip;
-    wire                mtip;
-    wire         [63:0] mtime;
+    wire        msip;
+    wire        mtip;
+    wire [63:0] mtime;
     // Machine external interrupt: the PLIC aggregates the peripheral
     // level IRQs (UART / I2C / SPI / GPIO), same as the board top. The
     // source IRQs reset deasserted, so they never raise meip unless a
     // test enables them through MMIO.
-    wire                uart_irq;
-    wire                i2c_irq;
-    wire                spi_irq;
-    wire                gpio_irq;
-    wire                fft_irq;
-    wire                i2s_irq;
-    wire                meip;
+    wire        uart_irq;
+    wire        i2c_irq;
+    wire        spi_irq;
+    wire        gpio_irq;
+    wire        fft_irq;
+    wire        i2s_irq;
+    wire        meip;
 
     // -----------------------------------------------------------------
     // CPU. Functional ports only; debug is observed via the Verilator
@@ -192,16 +201,43 @@ module sim_top #(
     ) u_imem (
         .clk_i       (clk_i),
         .rstn_i      (rstn_i),
-        .req_valid_i (imem_req.valid),
+        .req_valid_i (im_s_valid),
         .req_we_i    (1'b0),               // read-only
-        .req_addr_i  (imem_req.addr),
+        .req_addr_i  (im_s_addr),
         .req_wdata_i ({64{1'b0}}),
         .req_wstrb_i ({8{1'b0}}),
-        .req_rready_i(imem_req.rready),
-        .rsp_wready_o(imem_rsp.ready),
-        .rsp_rvalid_o(imem_rsp.rvalid),
-        .rsp_rdata_o (imem_rsp.rdata),
+        .req_rready_i(im_s_rready),
+        .rsp_wready_o(im_s_wready),
+        .rsp_rvalid_o(im_s_rvalid),
+        .rsp_rdata_o (im_s_rdata),
         .rsp_bvalid_o(imem_bvalid_unused)
+    );
+
+    mem_fuzz #(
+        .DATA_W(64),
+        .DEPTH (2),
+        .SALT  (1)
+    ) u_imem_fuzz (
+        .clk_i     (clk_i),
+        .rstn_i    (rstn_i),
+        .m_valid_i (imem_req.valid),
+        .m_we_i    (1'b0),
+        .m_addr_i  (imem_req.addr),
+        .m_wdata_i ('0),
+        .m_wstrb_i ('0),
+        .m_rready_i(imem_req.rready),
+        .m_wready_o(imem_rsp.ready),
+        .m_rvalid_o(imem_rsp.rvalid),
+        .m_rdata_o (imem_rsp.rdata),
+        .s_valid_o (im_s_valid),
+        .s_we_o    (),
+        .s_addr_o  (im_s_addr),
+        .s_wdata_o (),
+        .s_wstrb_o (),
+        .s_rready_o(im_s_rready),
+        .s_wready_i(im_s_wready),
+        .s_rvalid_i(im_s_rvalid),
+        .s_rdata_i (im_s_rdata)
     );
 
     // -----------------------------------------------------------------
@@ -222,16 +258,43 @@ module sim_top #(
     ) u_dmem (
         .clk_i       (clk_i),
         .rstn_i      (rstn_i),
-        .req_valid_i (dmem_req.wvalid),
-        .req_we_i    (dmem_req.we),
-        .req_addr_i  (dmem_req.addr),
-        .req_wdata_i (dmem_req.wdata),
-        .req_wstrb_i (dmem_req.wstrb),
-        .req_rready_i(dmem_req.rready),
-        .rsp_wready_o(dmem_rsp.wready),
-        .rsp_rvalid_o(dmem_rsp.rvalid),
-        .rsp_rdata_o (dmem_rsp.rdata),
+        .req_valid_i (dm_s_valid),
+        .req_we_i    (dm_s_we),
+        .req_addr_i  (dm_s_addr),
+        .req_wdata_i (dm_s_wdata),
+        .req_wstrb_i (dm_s_wstrb),
+        .req_rready_i(dm_s_rready),
+        .rsp_wready_o(dm_s_wready),
+        .rsp_rvalid_o(dm_s_rvalid),
+        .rsp_rdata_o (dm_s_rdata),
         .rsp_bvalid_o(dmem_rsp.bvalid)
+    );
+
+    mem_fuzz #(
+        .DATA_W(32),
+        .DEPTH (1),
+        .SALT  (2)
+    ) u_dmem_fuzz (
+        .clk_i     (clk_i),
+        .rstn_i    (rstn_i),
+        .m_valid_i (dmem_req.wvalid),
+        .m_we_i    (dmem_req.we),
+        .m_addr_i  (dmem_req.addr),
+        .m_wdata_i (dmem_req.wdata),
+        .m_wstrb_i (dmem_req.wstrb),
+        .m_rready_i(dmem_req.rready),
+        .m_wready_o(dmem_rsp.wready),
+        .m_rvalid_o(dmem_rsp.rvalid),
+        .m_rdata_o (dmem_rsp.rdata),
+        .s_valid_o (dm_s_valid),
+        .s_we_o    (dm_s_we),
+        .s_addr_o  (dm_s_addr),
+        .s_wdata_o (dm_s_wdata),
+        .s_wstrb_o (dm_s_wstrb),
+        .s_rready_o(dm_s_rready),
+        .s_wready_i(dm_s_wready),
+        .s_rvalid_i(dm_s_rvalid),
+        .s_rdata_i (dm_s_rdata)
     );
 
     string iinit_file;

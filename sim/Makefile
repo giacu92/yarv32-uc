@@ -27,6 +27,7 @@ RTL := \
 	../src/rtl/core/execute_stage.sv \
 	../src/rtl/core/rv32imac_zicsr_zifencei.sv \
 	../src/rtl/utils/native_ram.sv \
+	mem_fuzz.sv \
 	../src/rtl/utils/msip_peri.sv \
 	../src/rtl/utils/clint_timer.sv \
 	../src/rtl/utils/axi4_lite_uart.sv \
@@ -172,13 +173,18 @@ lint: $(HEX_PREREQ)
 	    -I../src/rtl/pkg -I../src/rtl/core -I../src/rtl/bus -I../src/rtl/utils \
 	    $(RTL) 2>&1 | grep -vE '^(- V e r|- Verilator:)' || true
 
+# REGRESS_ARGS: extra plusargs for every run (e.g. +MEM_FUZZ=<seed>).
+# REGRESS_CYC_MULT: scales every MAX_CYC bound (fuzzed memories are slower).
+REGRESS_ARGS ?=
+REGRESS_CYC_MULT ?= 1
+
 regress: $(TOP)
 	@fail=0; skip=0; pass=0; \
 	printf '%-15s %-6s %s\n' TEST RESULT DETAIL; \
 	for t in $(REGRESS_TESTS); do \
 	    name=$$(echo "$$t" | cut -d: -f1); \
 	    dir=$$(echo  "$$t" | cut -d: -f2); \
-	    maxc=$$(echo "$$t" | cut -d: -f3); \
+	    maxc=$$(( $$(echo "$$t" | cut -d: -f3) * $(REGRESS_CYC_MULT) )); \
 	    check=$$(echo "$$t" | cut -d: -f4-); \
 	    if [ ! -f "sw/$$dir/imem.hex" ]; then \
 	        printf '%-15s %-6s %s\n' "$$name" SKIP "not built -- run: make -C sw/$${dir%/*}"; \
@@ -192,7 +198,7 @@ regress: $(TOP)
 	               want=$$(echo "$$check" | sed 's/.*=//');; \
 	    esac; \
 	    out=$$(PROBE=$$probe NO_VCD=1 MAX_CYC=$$maxc RTL_TRACE=.regress.trace ./$(TOP) \
-	           +IINIT=sw/$$dir/imem.hex +DINIT=sw/$$dir/dmem.hex 2>&1); \
+	           +IINIT=sw/$$dir/imem.hex +DINIT=sw/$$dir/dmem.hex $(REGRESS_ARGS) 2>&1); \
 	    cyc=$$(echo "$$out" | sed -n 's/^retired [0-9]* instructions in \([0-9]*\) cycles.*/\1/p'); \
 	    bad=; \
 	    echo "$$out" | grep -q 'WFI-HALT FAIL' && bad="WFI-HALT FAIL"; \
@@ -214,9 +220,9 @@ regress: $(TOP)
 	done; \
 	rm -f .regress.trace; \
 	if [ -f sw/peri/uart_echo/build/imem.hex ]; then \
-	    out=$$(UART_RX='abcdefgh' NO_VCD=1 MAX_CYC=400000 ./$(TOP) \
+	    out=$$(UART_RX='abcdefgh' NO_VCD=1 MAX_CYC=$$((400000 * $(REGRESS_CYC_MULT))) ./$(TOP) \
 	           +IINIT=sw/peri/uart_echo/build/imem.hex \
-	           +DINIT=sw/peri/uart_echo/build/dmem.hex 2>&1); \
+	           +DINIT=sw/peri/uart_echo/build/dmem.hex $(REGRESS_ARGS) 2>&1); \
 	    cyc=$$(echo "$$out" | sed -n 's/^retired [0-9]* instructions in \([0-9]*\) cycles.*/\1/p'); \
 	    if tr -d '\n\r' < sim_uart_tx.txt | grep -q 'GOOD$$'; then \
 	        printf '%-15s %-6s %s\n' uart_echo PASS "$$cyc cyc, TX ends GOOD"; pass=$$((pass+1)); \
@@ -226,7 +232,7 @@ regress: $(TOP)
 	else \
 	    printf '%-15s %-6s %s\n' uart_echo SKIP "no build/"; skip=$$((skip+1)); \
 	fi; \
-	out=$$(NO_VCD=1 MAX_CYC=4000 ./$(TOP) 2>&1); \
+	out=$$(NO_VCD=1 MAX_CYC=$$((4000 * $(REGRESS_CYC_MULT))) ./$(TOP) $(REGRESS_ARGS) 2>&1); \
 	if echo "$$out" | grep -q 'WFI-halt check: OK' && echo "$$out" | grep -q 'parked at'; then \
 	    printf '%-15s %-6s %s\n' harvard_oracle PASS "parks clean"; pass=$$((pass+1)); \
 	else \
@@ -234,6 +240,22 @@ regress: $(TOP)
 	fi; \
 	echo; echo "$$pass passed, $$fail failed, $$skip skipped"; \
 	[ $$fail -eq 0 ]
+
+# regress-fuzz: the whole oracle set on variable-latency memories
+# (mem_fuzz.sv), once per seed. Proves the core does not assume 1-cycle
+# BSRAMs -- the M3 acceptance test of the Linux plan.
+# The exit status is make's, captured before the output is trimmed: piping
+# into `tail` would report tail's status and the target could never fail
+# (it did exactly that in its first version, 2026-11-22).
+FUZZ_SEEDS ?= 1 2 3
+FUZZ_CYC_MULT ?= 8
+regress-fuzz: $(TOP)
+	@rc=0; for s in $(FUZZ_SEEDS); do \
+	    echo "== MEM_FUZZ seed $$s"; \
+	    out=$$($(MAKE) --no-print-directory regress REGRESS_ARGS=+MEM_FUZZ=$$s \
+	          REGRESS_CYC_MULT=$(FUZZ_CYC_MULT) 2>&1) || rc=1; \
+	    echo "$$out" | grep -E ' FAIL ' ; echo "$$out" | tail -1; \
+	done; exit $$rc
 
 # ----------------------------------------------------------------------
 # compliance -- the official riscv-tests ISA suite (sw/compliance/)

@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * yarv32 Linux SoC (linux-soc branch) -- device-tree fragment, M8.
+ *
+ * Describes the peripherals that are register-compatible with mainline
+ * drivers as of M8 (rv32_pkg.sv, "LINUX-BRANCH PERIPHERAL MAP"):
+ *
+ *   0x1000_0000  4 KiB  UART   ns16550a, reg-shift 2, reg-io-width 4
+ *   0x1001_0000 64 KiB  CLINT  sifive,clint0 / riscv,clint0
+ *   0x1040_0000  4 MiB  PLIC   sifive,plic-1.0.0, contexts: 0 = M, 1 = S
+ *
+ * NOT FINAL. The memory node is a placeholder: the SDRAM-backed unified
+ * memory arrives at M5, and its base/size is fixed there. The ISA string
+ * reflects the core as of M2 (A implemented, no S/U, no MMU), i.e. a
+ * nommu M-mode kernel; M11-M12 change it.
+ *
+ * Clocks. The core and every peripheral run on one 50 MHz clock (rPLL
+ * 25 MHz x 10 / 5). The CLINT's mtime increments every core clock, so
+ * timebase-frequency = 50 MHz. The 16550's bit time is 16 x DL clocks of
+ * that same clock, so clock-frequency = 50 MHz and Linux computes
+ * DL = 50e6 / (16 * 115200) = 27 (115 741 baud, +0.47%).
+ */
+
+/dts-v1/;
+
+/ {
+	#address-cells = <1>;
+	#size-cells = <1>;
+	compatible = "yarv32,linux-soc";
+	model = "yarv32 Linux SoC (Tang Nano 20K)";
+
+	chosen {
+		bootargs = "earlycon=uart8250,mmio32,0x10000000 console=ttyS0,115200";
+		stdout-path = "serial0:115200n8";
+	};
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		timebase-frequency = <50000000>;
+
+		cpu0: cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			compatible = "riscv";
+			riscv,isa = "rv32imac_zicsr_zifencei_zicntr";
+			riscv,isa-base = "rv32i";
+			riscv,isa-extensions = "i", "m", "a", "c", "zicsr", "zifencei", "zicntr";
+			status = "okay";
+
+			cpu0_intc: interrupt-controller {
+				#interrupt-cells = <1>;
+				compatible = "riscv,cpu-intc";
+				interrupt-controller;
+			};
+		};
+	};
+
+	/* PLACEHOLDER until M5 (SDRAM unified memory). */
+	memory@0 {
+		device_type = "memory";
+		reg = <0x00000000 0x00800000>;
+	};
+
+	soc {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		compatible = "simple-bus";
+		ranges;
+
+		clint0: clint@10010000 {
+			compatible = "sifive,clint0", "riscv,clint0";
+			reg = <0x10010000 0x10000>;
+			/* M-mode software (3) and timer (7) interrupts of hart 0 */
+			interrupts-extended = <&cpu0_intc 3>, <&cpu0_intc 7>;
+		};
+
+		plic0: interrupt-controller@10400000 {
+			compatible = "sifive,plic-1.0.0";
+			reg = <0x10400000 0x400000>;
+			#address-cells = <0>;
+			#interrupt-cells = <1>;
+			interrupt-controller;
+			/* context 0 = M-mode external (11), context 1 = S-mode
+			 * external (9). The S context exists in the RTL (seip_o)
+			 * but has no consumer until S-mode is implemented (M11). */
+			interrupts-extended = <&cpu0_intc 11>, <&cpu0_intc 9>;
+			riscv,ndev = <15>;
+		};
+
+		uart0: serial@10000000 {
+			compatible = "ns16550a";
+			reg = <0x10000000 0x1000>;
+			reg-shift = <2>;
+			reg-io-width = <4>;
+			clock-frequency = <50000000>;
+			current-speed = <115200>;
+			interrupts-extended = <&plic0 1>;
+		};
+
+		/* SPI (0x1000_6000) and GPIO (0x1000_7000) use this project's own
+		 * register maps, not a mainline-compatible one: SPI is for the
+		 * boot loader (M9), GPIO for debug LEDs. They are deliberately
+		 * not described here. PLIC sources: 3 = SPI, 4 = GPIO. */
+	};
+};

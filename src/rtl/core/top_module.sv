@@ -198,54 +198,37 @@ module top_module (
     wire rstn_core = rst_sync[1];
 
     // -----------------------------------------------------------------
-    // AXI4-Lite buses (trunk modport).
-    //
-    //   axi_bus_peri  : CPU peri master -> peri xbar (1->7, base+size decode).
-    //   axi_bus_uart  : xbar m0 -> UART  slave (UART_BASE      0x1000_0000).
-    //   axi_bus_timer : xbar m1 -> timer slave (MTIMER_BASE    0x1000_1000).
-    //   axi_bus_msip  : xbar m2 -> MSIP  slave (MSIP_PERI_ADDR 0x1000_3000).
-    //   axi_bus_i2c   : xbar m3 -> I2C   slave (I2C_BASE       0x1000_5000).
-    //   axi_bus_spi   : xbar m4 -> SPI   slave (SPI_BASE       0x1000_6000).
-    //   axi_bus_gpio  : xbar m5 -> GPIO   slave (GPIO_BASE       0x1000_7000).
-    //   axi_bus_plic  : xbar m6 -> PLIC   slave (PLIC_BASE       0x1000_8000).
-    //   axi_bus_fft   : xbar m7 -> FFT    slave (FFT_BASE        0x1000_A000, 8 KiB).
-    //   axi_bus_i2s   : xbar m8 -> I2S    slave (I2S_BASE        0x1000_C000).
+    // AXI4-Lite buses (trunk modport). LINUX-BRANCH MAP (linux-soc M8,
+    // see rv32_pkg): five windows, each at the offsets a mainline driver
+    // expects.
+    //   axi_bus_peri  : CPU peri master -> peri xbar (1->5, base+size).
+    //   axi_bus_uart  : UART  16550   (UART_BASE  0x1000_0000,  4 KiB)
+    //   axi_bus_spi   : SPI           (SPI_BASE   0x1000_6000,  4 KiB)
+    //   axi_bus_gpio  : GPIO          (GPIO_BASE  0x1000_7000,  4 KiB)
+    //   axi_bus_clint : CLINT, SiFive (CLINT_BASE 0x1001_0000, 64 KiB)
+    //   axi_bus_plic  : PLIC, SiFive  (PLIC_BASE  0x1040_0000,  4 MiB)
+    // FFT, I2S and I2C are main-only; their board pins are left released.
     // -----------------------------------------------------------------
     axi4_lite_if axi_bus_peri ();
-    axi4_lite_if axi_bus_msip ();
-    axi4_lite_if axi_bus_timer ();
     axi4_lite_if axi_bus_uart ();
-    axi4_lite_if axi_bus_i2c ();
     axi4_lite_if axi_bus_spi ();
     axi4_lite_if axi_bus_gpio ();
+    axi4_lite_if axi_bus_clint ();
     axi4_lite_if axi_bus_plic ();
-    axi4_lite_if axi_bus_fft ();
-    axi4_lite_if axi_bus_i2s ();
 
-    // Single clock domain: the whole fabric (CPU bridge, memories, the
-    // buses) runs on clk_core / rstn_core. There is NO clock-domain
-    // crossing — clk_i (25 MHz) only feeds the rPLL, and rstn_i is the
-    // async board reset that feeds the synchronizer.
+    // Single clock domain: the whole fabric runs on clk_core / rstn_core.
     assign axi_bus_peri.aclk     = clk_core;
     assign axi_bus_peri.aresetn  = rstn_core;
-    assign axi_bus_msip.aclk     = clk_core;
-    assign axi_bus_msip.aresetn  = rstn_core;
-    assign axi_bus_timer.aclk    = clk_core;
-    assign axi_bus_timer.aresetn = rstn_core;
     assign axi_bus_uart.aclk     = clk_core;
     assign axi_bus_uart.aresetn  = rstn_core;
-    assign axi_bus_i2c.aclk      = clk_core;
-    assign axi_bus_i2c.aresetn   = rstn_core;
     assign axi_bus_spi.aclk      = clk_core;
     assign axi_bus_spi.aresetn   = rstn_core;
     assign axi_bus_gpio.aclk     = clk_core;
     assign axi_bus_gpio.aresetn  = rstn_core;
+    assign axi_bus_clint.aclk    = clk_core;
+    assign axi_bus_clint.aresetn = rstn_core;
     assign axi_bus_plic.aclk     = clk_core;
     assign axi_bus_plic.aresetn  = rstn_core;
-    assign axi_bus_fft.aclk      = clk_core;
-    assign axi_bus_fft.aresetn   = rstn_core;
-    assign axi_bus_i2s.aclk      = clk_core;
-    assign axi_bus_i2s.aresetn   = rstn_core;
 
     // Debug tap: decode or execute stage stall.
     //wire         dbg_stall;
@@ -270,21 +253,13 @@ module top_module (
     wire         mtip;
     wire [63:0] mtime;
 
-    // Machine external interrupt: the PLIC aggregates the peripheral
-    // level IRQs (UART / I2C / SPI / GPIO) and adds cause IDs plus an
-    // enable mask. ENABLE resets all-ones, so meip degenerates to the
-    // OR of the lines and pre-PLIC firmware runs unchanged; the source
-    // IRQs still reset deasserted (peripheral IE registers reset 0), so
-    // an unconfigured peripheral never raises meip. Source IDs come from
-    // rv32_pkg (PLIC_SRC_*); MSIP/MTIP stay direct (CLINT-style, outside
-    // the PLIC).
+    // Machine external interrupt from the sifive PLIC's context 0; the S-mode
+    // context (seip) has no consumer until S-mode exists (M11).
     wire         uart_irq;
-    wire         i2c_irq;
     wire         spi_irq;
     wire         gpio_irq;
-    wire         fft_irq;
-    wire         i2s_irq;
     wire         meip;
+    wire         seip_unused;
 
     // -----------------------------------------------------------------
     // CPU. Functional ports only — no debug crosses the CPU boundary
@@ -389,46 +364,17 @@ module top_module (
     );
 
     // -----------------------------------------------------------------
-    // Peripheral bus: parametric address-decode xbar (1->N) splitting the
-    // peri bus into the UART, the CLINT timer, the MSIP slave, the I2C
-    // master and the SPI master by base+size. Single-outstanding pass-through (the
-    // CPU bridge is single-outstanding overall). An address in the peri
-    // region matching no window is completed with a DECERR by the xbar's
-    // terminator, not left to hang.
-    // The xbar's target side is flat vectors (a parametric port count
-    // cannot be N interface ports, and Gowin rejects interface-array
-    // ports -- see axi4_lite_xbar.sv), so each slave's axi4_lite_if
-    // instance is glued to its window with plain assigns: payload
-    // broadcast, handshake bit i = window i.
-    //   window 0 -> axi_bus_uart  (UART_BASE      0x1000_0000, 4 KiB)
-    //   window 1 -> axi_bus_timer (MTIMER_BASE    0x1000_1000, 8 KiB)
-    //   window 2 -> axi_bus_msip  (MSIP_PERI_ADDR 0x1000_3000, 4 KiB)
-    //   window 3 -> axi_bus_i2c   (I2C_BASE       0x1000_5000, 4 KiB)
-    //   window 4 -> axi_bus_spi   (SPI_BASE       0x1000_6000, 4 KiB)
-    //   window 5 -> axi_bus_gpio  (GPIO_BASE       0x1000_7000, 4 KiB)
-    //   window 6 -> axi_bus_plic  (PLIC_BASE       0x1000_8000, 4 KiB)
-    //   window 7 -> axi_bus_fft   (FFT_BASE        0x1000_A000, 8 KiB)
-    //   window 8 -> axi_bus_i2s   (I2S_BASE        0x1000_C000, 4 KiB)
-    // 0x1000_4000 is unmapped (it held the SDIO controller until it was
-    // dropped from this branch), and 0x1000_9000 is unmapped to keep the
-    // FFT's 8 KiB window 8 KiB aligned; an access to either gets a DECERR.
+    // Peripheral crossbar, Linux-branch map (see the bus list above). An
+    // address in the peri region matching no window gets a DECERR from the
+    // xbar's terminator. Target side is flat vectors glued to each slave's
+    // interface (see axi4_lite_xbar.sv for why).
     // -----------------------------------------------------------------
-    localparam int unsigned PERI_N = 9;
-
-    // Window indices: the one constant each glue block below indexes off
-    // (awvalid[W_x], bresp[2*W_x+:2], rdata[32*W_x+:32]), so a renumbered
-    // or new window cannot leave a hand-derived literal behind in one
-    // block and not the others -- a missed edit there routes one slave's
-    // response into another window with no elaboration error.
+    localparam int unsigned PERI_N = 5;
     localparam int unsigned W_UART = 0;
-    localparam int unsigned W_TIMER = 1;
-    localparam int unsigned W_MSIP = 2;
-    localparam int unsigned W_I2C = 3;
-    localparam int unsigned W_SPI = 4;
-    localparam int unsigned W_GPIO = 5;
-    localparam int unsigned W_PLIC = 6;
-    localparam int unsigned W_FFT = 7;
-    localparam int unsigned W_I2S = 8;
+    localparam int unsigned W_SPI = 1;
+    localparam int unsigned W_GPIO = 2;
+    localparam int unsigned W_CLINT = 3;
+    localparam int unsigned W_PLIC = 4;
 
     logic [         31:0] peri_awaddr;
     logic [         31:0] peri_wdata;
@@ -451,25 +397,17 @@ module top_module (
     axi4_lite_xbar #(
         .N(PERI_N),
         .BASES({
-            rv32_pkg::I2S_BASE,
-            rv32_pkg::FFT_BASE,
             rv32_pkg::PLIC_BASE,
+            rv32_pkg::CLINT_BASE,
             rv32_pkg::GPIO_BASE,
             rv32_pkg::SPI_BASE,
-            rv32_pkg::I2C_BASE,
-            rv32_pkg::MSIP_PERI_ADDR,
-            rv32_pkg::MTIMER_BASE,
             rv32_pkg::UART_BASE
         }),
         .SIZES({
-            rv32_pkg::I2S_SIZE,
-            rv32_pkg::FFT_SIZE,
             rv32_pkg::PLIC_SIZE,
+            rv32_pkg::CLINT_SIZE,
             rv32_pkg::GPIO_SIZE,
             rv32_pkg::SPI_SIZE,
-            rv32_pkg::I2C_SIZE,
-            rv32_pkg::MSIP_PERI_SIZE,
-            rv32_pkg::MTIMER_SIZE,
             rv32_pkg::UART_SIZE
         })
     ) u_peri_xbar (
@@ -495,220 +433,107 @@ module top_module (
         .m_rdata_i  (peri_rdata)
     );
 
-    // Window 0: UART. Payload is broadcast; glue the per-target bits.
-    assign axi_bus_uart.awaddr        = peri_awaddr;
-    assign axi_bus_uart.wdata         = peri_wdata;
-    assign axi_bus_uart.wstrb         = peri_wstrb;
-    assign axi_bus_uart.araddr        = peri_araddr;
-    assign axi_bus_uart.awvalid       = peri_awvalid[W_UART];
-    assign axi_bus_uart.wvalid        = peri_wvalid[W_UART];
-    assign axi_bus_uart.bready        = peri_bready[W_UART];
-    assign axi_bus_uart.arvalid       = peri_arvalid[W_UART];
-    assign axi_bus_uart.rready        = peri_rready[W_UART];
-    assign peri_awready[W_UART]       = axi_bus_uart.awready;
-    assign peri_wready[W_UART]        = axi_bus_uart.wready;
-    assign peri_bvalid[W_UART]        = axi_bus_uart.bvalid;
-    assign peri_arready[W_UART]       = axi_bus_uart.arready;
-    assign peri_rvalid[W_UART]        = axi_bus_uart.rvalid;
-    assign peri_bresp[2*W_UART+:2]    = axi_bus_uart.bresp;
-    assign peri_rresp[2*W_UART+:2]    = axi_bus_uart.rresp;
-    assign peri_rdata[32*W_UART+:32]  = axi_bus_uart.rdata;
+    assign axi_bus_uart.awaddr  = peri_awaddr;
+    assign axi_bus_uart.wdata   = peri_wdata;
+    assign axi_bus_uart.wstrb   = peri_wstrb;
+    assign axi_bus_uart.araddr  = peri_araddr;
+    assign axi_bus_uart.awvalid = peri_awvalid[W_UART];
+    assign axi_bus_uart.wvalid  = peri_wvalid[W_UART];
+    assign axi_bus_uart.bready  = peri_bready[W_UART];
+    assign axi_bus_uart.arvalid = peri_arvalid[W_UART];
+    assign axi_bus_uart.rready  = peri_rready[W_UART];
+    assign peri_awready[W_UART]  = axi_bus_uart.awready;
+    assign peri_wready[W_UART]   = axi_bus_uart.wready;
+    assign peri_bvalid[W_UART]   = axi_bus_uart.bvalid;
+    assign peri_arready[W_UART]  = axi_bus_uart.arready;
+    assign peri_rvalid[W_UART]   = axi_bus_uart.rvalid;
+    assign peri_bresp[2*W_UART+:2]   = axi_bus_uart.bresp;
+    assign peri_rresp[2*W_UART+:2]   = axi_bus_uart.rresp;
+    assign peri_rdata[32*W_UART+:32] = axi_bus_uart.rdata;
 
-    // Window 1: CLINT timer.
-    assign axi_bus_timer.awaddr       = peri_awaddr;
-    assign axi_bus_timer.wdata        = peri_wdata;
-    assign axi_bus_timer.wstrb        = peri_wstrb;
-    assign axi_bus_timer.araddr       = peri_araddr;
-    assign axi_bus_timer.awvalid      = peri_awvalid[W_TIMER];
-    assign axi_bus_timer.wvalid       = peri_wvalid[W_TIMER];
-    assign axi_bus_timer.bready       = peri_bready[W_TIMER];
-    assign axi_bus_timer.arvalid      = peri_arvalid[W_TIMER];
-    assign axi_bus_timer.rready       = peri_rready[W_TIMER];
-    assign peri_awready[W_TIMER]      = axi_bus_timer.awready;
-    assign peri_wready[W_TIMER]       = axi_bus_timer.wready;
-    assign peri_bvalid[W_TIMER]       = axi_bus_timer.bvalid;
-    assign peri_arready[W_TIMER]      = axi_bus_timer.arready;
-    assign peri_rvalid[W_TIMER]       = axi_bus_timer.rvalid;
-    assign peri_bresp[2*W_TIMER+:2]   = axi_bus_timer.bresp;
-    assign peri_rresp[2*W_TIMER+:2]   = axi_bus_timer.rresp;
-    assign peri_rdata[32*W_TIMER+:32] = axi_bus_timer.rdata;
+    assign axi_bus_spi.awaddr  = peri_awaddr;
+    assign axi_bus_spi.wdata   = peri_wdata;
+    assign axi_bus_spi.wstrb   = peri_wstrb;
+    assign axi_bus_spi.araddr  = peri_araddr;
+    assign axi_bus_spi.awvalid = peri_awvalid[W_SPI];
+    assign axi_bus_spi.wvalid  = peri_wvalid[W_SPI];
+    assign axi_bus_spi.bready  = peri_bready[W_SPI];
+    assign axi_bus_spi.arvalid = peri_arvalid[W_SPI];
+    assign axi_bus_spi.rready  = peri_rready[W_SPI];
+    assign peri_awready[W_SPI]  = axi_bus_spi.awready;
+    assign peri_wready[W_SPI]   = axi_bus_spi.wready;
+    assign peri_bvalid[W_SPI]   = axi_bus_spi.bvalid;
+    assign peri_arready[W_SPI]  = axi_bus_spi.arready;
+    assign peri_rvalid[W_SPI]   = axi_bus_spi.rvalid;
+    assign peri_bresp[2*W_SPI+:2]   = axi_bus_spi.bresp;
+    assign peri_rresp[2*W_SPI+:2]   = axi_bus_spi.rresp;
+    assign peri_rdata[32*W_SPI+:32] = axi_bus_spi.rdata;
 
-    // Window 2: MSIP.
-    assign axi_bus_msip.awaddr        = peri_awaddr;
-    assign axi_bus_msip.wdata         = peri_wdata;
-    assign axi_bus_msip.wstrb         = peri_wstrb;
-    assign axi_bus_msip.araddr        = peri_araddr;
-    assign axi_bus_msip.awvalid       = peri_awvalid[W_MSIP];
-    assign axi_bus_msip.wvalid        = peri_wvalid[W_MSIP];
-    assign axi_bus_msip.bready        = peri_bready[W_MSIP];
-    assign axi_bus_msip.arvalid       = peri_arvalid[W_MSIP];
-    assign axi_bus_msip.rready        = peri_rready[W_MSIP];
-    assign peri_awready[W_MSIP]       = axi_bus_msip.awready;
-    assign peri_wready[W_MSIP]        = axi_bus_msip.wready;
-    assign peri_bvalid[W_MSIP]        = axi_bus_msip.bvalid;
-    assign peri_arready[W_MSIP]       = axi_bus_msip.arready;
-    assign peri_rvalid[W_MSIP]        = axi_bus_msip.rvalid;
-    assign peri_bresp[2*W_MSIP+:2]    = axi_bus_msip.bresp;
-    assign peri_rresp[2*W_MSIP+:2]    = axi_bus_msip.rresp;
-    assign peri_rdata[32*W_MSIP+:32]  = axi_bus_msip.rdata;
+    assign axi_bus_gpio.awaddr  = peri_awaddr;
+    assign axi_bus_gpio.wdata   = peri_wdata;
+    assign axi_bus_gpio.wstrb   = peri_wstrb;
+    assign axi_bus_gpio.araddr  = peri_araddr;
+    assign axi_bus_gpio.awvalid = peri_awvalid[W_GPIO];
+    assign axi_bus_gpio.wvalid  = peri_wvalid[W_GPIO];
+    assign axi_bus_gpio.bready  = peri_bready[W_GPIO];
+    assign axi_bus_gpio.arvalid = peri_arvalid[W_GPIO];
+    assign axi_bus_gpio.rready  = peri_rready[W_GPIO];
+    assign peri_awready[W_GPIO]  = axi_bus_gpio.awready;
+    assign peri_wready[W_GPIO]   = axi_bus_gpio.wready;
+    assign peri_bvalid[W_GPIO]   = axi_bus_gpio.bvalid;
+    assign peri_arready[W_GPIO]  = axi_bus_gpio.arready;
+    assign peri_rvalid[W_GPIO]   = axi_bus_gpio.rvalid;
+    assign peri_bresp[2*W_GPIO+:2]   = axi_bus_gpio.bresp;
+    assign peri_rresp[2*W_GPIO+:2]   = axi_bus_gpio.rresp;
+    assign peri_rdata[32*W_GPIO+:32] = axi_bus_gpio.rdata;
 
-    // Window 3: I2C.
-    assign axi_bus_i2c.awaddr         = peri_awaddr;
-    assign axi_bus_i2c.wdata          = peri_wdata;
-    assign axi_bus_i2c.wstrb          = peri_wstrb;
-    assign axi_bus_i2c.araddr         = peri_araddr;
-    assign axi_bus_i2c.awvalid        = peri_awvalid[W_I2C];
-    assign axi_bus_i2c.wvalid         = peri_wvalid[W_I2C];
-    assign axi_bus_i2c.bready         = peri_bready[W_I2C];
-    assign axi_bus_i2c.arvalid        = peri_arvalid[W_I2C];
-    assign axi_bus_i2c.rready         = peri_rready[W_I2C];
-    assign peri_awready[W_I2C]        = axi_bus_i2c.awready;
-    assign peri_wready[W_I2C]         = axi_bus_i2c.wready;
-    assign peri_bvalid[W_I2C]         = axi_bus_i2c.bvalid;
-    assign peri_arready[W_I2C]        = axi_bus_i2c.arready;
-    assign peri_rvalid[W_I2C]         = axi_bus_i2c.rvalid;
-    assign peri_bresp[2*W_I2C+:2]     = axi_bus_i2c.bresp;
-    assign peri_rresp[2*W_I2C+:2]     = axi_bus_i2c.rresp;
-    assign peri_rdata[32*W_I2C+:32]   = axi_bus_i2c.rdata;
+    assign axi_bus_clint.awaddr  = peri_awaddr;
+    assign axi_bus_clint.wdata   = peri_wdata;
+    assign axi_bus_clint.wstrb   = peri_wstrb;
+    assign axi_bus_clint.araddr  = peri_araddr;
+    assign axi_bus_clint.awvalid = peri_awvalid[W_CLINT];
+    assign axi_bus_clint.wvalid  = peri_wvalid[W_CLINT];
+    assign axi_bus_clint.bready  = peri_bready[W_CLINT];
+    assign axi_bus_clint.arvalid = peri_arvalid[W_CLINT];
+    assign axi_bus_clint.rready  = peri_rready[W_CLINT];
+    assign peri_awready[W_CLINT]  = axi_bus_clint.awready;
+    assign peri_wready[W_CLINT]   = axi_bus_clint.wready;
+    assign peri_bvalid[W_CLINT]   = axi_bus_clint.bvalid;
+    assign peri_arready[W_CLINT]  = axi_bus_clint.arready;
+    assign peri_rvalid[W_CLINT]   = axi_bus_clint.rvalid;
+    assign peri_bresp[2*W_CLINT+:2]   = axi_bus_clint.bresp;
+    assign peri_rresp[2*W_CLINT+:2]   = axi_bus_clint.rresp;
+    assign peri_rdata[32*W_CLINT+:32] = axi_bus_clint.rdata;
 
-    // Window 4: SPI.
-    assign axi_bus_spi.awaddr         = peri_awaddr;
-    assign axi_bus_spi.wdata          = peri_wdata;
-    assign axi_bus_spi.wstrb          = peri_wstrb;
-    assign axi_bus_spi.araddr         = peri_araddr;
-    assign axi_bus_spi.awvalid        = peri_awvalid[W_SPI];
-    assign axi_bus_spi.wvalid         = peri_wvalid[W_SPI];
-    assign axi_bus_spi.bready         = peri_bready[W_SPI];
-    assign axi_bus_spi.arvalid        = peri_arvalid[W_SPI];
-    assign axi_bus_spi.rready         = peri_rready[W_SPI];
-    assign peri_awready[W_SPI]        = axi_bus_spi.awready;
-    assign peri_wready[W_SPI]         = axi_bus_spi.wready;
-    assign peri_bvalid[W_SPI]         = axi_bus_spi.bvalid;
-    assign peri_arready[W_SPI]        = axi_bus_spi.arready;
-    assign peri_rvalid[W_SPI]         = axi_bus_spi.rvalid;
-    assign peri_bresp[2*W_SPI+:2]     = axi_bus_spi.bresp;
-    assign peri_rresp[2*W_SPI+:2]     = axi_bus_spi.rresp;
-    assign peri_rdata[32*W_SPI+:32]   = axi_bus_spi.rdata;
-
-    // Window 5: GPIO.
-    assign axi_bus_gpio.awaddr        = peri_awaddr;
-    assign axi_bus_gpio.wdata         = peri_wdata;
-    assign axi_bus_gpio.wstrb         = peri_wstrb;
-    assign axi_bus_gpio.araddr        = peri_araddr;
-    assign axi_bus_gpio.awvalid       = peri_awvalid[W_GPIO];
-    assign axi_bus_gpio.wvalid        = peri_wvalid[W_GPIO];
-    assign axi_bus_gpio.bready        = peri_bready[W_GPIO];
-    assign axi_bus_gpio.arvalid       = peri_arvalid[W_GPIO];
-    assign axi_bus_gpio.rready        = peri_rready[W_GPIO];
-    assign peri_awready[W_GPIO]       = axi_bus_gpio.awready;
-    assign peri_wready[W_GPIO]        = axi_bus_gpio.wready;
-    assign peri_bvalid[W_GPIO]        = axi_bus_gpio.bvalid;
-    assign peri_arready[W_GPIO]       = axi_bus_gpio.arready;
-    assign peri_rvalid[W_GPIO]        = axi_bus_gpio.rvalid;
-    assign peri_bresp[2*W_GPIO+:2]    = axi_bus_gpio.bresp;
-    assign peri_rresp[2*W_GPIO+:2]    = axi_bus_gpio.rresp;
-    assign peri_rdata[32*W_GPIO+:32]  = axi_bus_gpio.rdata;
-
-    // Window 6: PLIC.
-    assign axi_bus_plic.awaddr        = peri_awaddr;
-    assign axi_bus_plic.wdata         = peri_wdata;
-    assign axi_bus_plic.wstrb         = peri_wstrb;
-    assign axi_bus_plic.araddr        = peri_araddr;
-    assign axi_bus_plic.awvalid       = peri_awvalid[W_PLIC];
-    assign axi_bus_plic.wvalid        = peri_wvalid[W_PLIC];
-    assign axi_bus_plic.bready        = peri_bready[W_PLIC];
-    assign axi_bus_plic.arvalid       = peri_arvalid[W_PLIC];
-    assign axi_bus_plic.rready        = peri_rready[W_PLIC];
-    assign peri_awready[W_PLIC]       = axi_bus_plic.awready;
-    assign peri_wready[W_PLIC]        = axi_bus_plic.wready;
-    assign peri_bvalid[W_PLIC]        = axi_bus_plic.bvalid;
-    assign peri_arready[W_PLIC]       = axi_bus_plic.arready;
-    assign peri_rvalid[W_PLIC]        = axi_bus_plic.rvalid;
-    assign peri_bresp[2*W_PLIC+:2]    = axi_bus_plic.bresp;
-    assign peri_rresp[2*W_PLIC+:2]    = axi_bus_plic.rresp;
-    assign peri_rdata[32*W_PLIC+:32]  = axi_bus_plic.rdata;
-
-    // Window 7: FFT coprocessor (8 KiB -- twice every other window, see
-    // rv32_pkg::FFT_SIZE).
-    assign axi_bus_fft.awaddr         = peri_awaddr;
-    assign axi_bus_fft.wdata          = peri_wdata;
-    assign axi_bus_fft.wstrb          = peri_wstrb;
-    assign axi_bus_fft.araddr         = peri_araddr;
-    assign axi_bus_fft.awvalid        = peri_awvalid[W_FFT];
-    assign axi_bus_fft.wvalid         = peri_wvalid[W_FFT];
-    assign axi_bus_fft.bready         = peri_bready[W_FFT];
-    assign axi_bus_fft.arvalid        = peri_arvalid[W_FFT];
-    assign axi_bus_fft.rready         = peri_rready[W_FFT];
-    assign peri_awready[W_FFT]        = axi_bus_fft.awready;
-    assign peri_wready[W_FFT]         = axi_bus_fft.wready;
-    assign peri_bvalid[W_FFT]         = axi_bus_fft.bvalid;
-    assign peri_arready[W_FFT]        = axi_bus_fft.arready;
-    assign peri_rvalid[W_FFT]         = axi_bus_fft.rvalid;
-    assign peri_bresp[2*W_FFT+:2]     = axi_bus_fft.bresp;
-    assign peri_rresp[2*W_FFT+:2]     = axi_bus_fft.rresp;
-    assign peri_rdata[32*W_FFT+:32]   = axi_bus_fft.rdata;
-
-    assign axi_bus_i2s.awaddr         = peri_awaddr;
-    assign axi_bus_i2s.wdata          = peri_wdata;
-    assign axi_bus_i2s.wstrb          = peri_wstrb;
-    assign axi_bus_i2s.araddr         = peri_araddr;
-    assign axi_bus_i2s.awvalid        = peri_awvalid[W_I2S];
-    assign axi_bus_i2s.wvalid         = peri_wvalid[W_I2S];
-    assign axi_bus_i2s.bready         = peri_bready[W_I2S];
-    assign axi_bus_i2s.arvalid        = peri_arvalid[W_I2S];
-    assign axi_bus_i2s.rready         = peri_rready[W_I2S];
-    assign peri_awready[W_I2S]        = axi_bus_i2s.awready;
-    assign peri_wready[W_I2S]         = axi_bus_i2s.wready;
-    assign peri_bvalid[W_I2S]         = axi_bus_i2s.bvalid;
-    assign peri_arready[W_I2S]        = axi_bus_i2s.arready;
-    assign peri_rvalid[W_I2S]         = axi_bus_i2s.rvalid;
-    assign peri_bresp[2*W_I2S+:2]     = axi_bus_i2s.bresp;
-    assign peri_rresp[2*W_I2S+:2]     = axi_bus_i2s.rresp;
-    assign peri_rdata[32*W_I2S+:32]   = axi_bus_i2s.rdata;
+    assign axi_bus_plic.awaddr  = peri_awaddr;
+    assign axi_bus_plic.wdata   = peri_wdata;
+    assign axi_bus_plic.wstrb   = peri_wstrb;
+    assign axi_bus_plic.araddr  = peri_araddr;
+    assign axi_bus_plic.awvalid = peri_awvalid[W_PLIC];
+    assign axi_bus_plic.wvalid  = peri_wvalid[W_PLIC];
+    assign axi_bus_plic.bready  = peri_bready[W_PLIC];
+    assign axi_bus_plic.arvalid = peri_arvalid[W_PLIC];
+    assign axi_bus_plic.rready  = peri_rready[W_PLIC];
+    assign peri_awready[W_PLIC]  = axi_bus_plic.awready;
+    assign peri_wready[W_PLIC]   = axi_bus_plic.wready;
+    assign peri_bvalid[W_PLIC]   = axi_bus_plic.bvalid;
+    assign peri_arready[W_PLIC]  = axi_bus_plic.arready;
+    assign peri_rvalid[W_PLIC]   = axi_bus_plic.rvalid;
+    assign peri_bresp[2*W_PLIC+:2]   = axi_bus_plic.bresp;
+    assign peri_rresp[2*W_PLIC+:2]   = axi_bus_plic.rresp;
+    assign peri_rdata[32*W_PLIC+:32] = axi_bus_plic.rdata;
 
     // -----------------------------------------------------------------
-    // I2C master (axi4_lite_i2c). Open-drain pins: the peripheral outputs
-    // only an oe (drive low when set); the tri-state here releases the pin
-    // otherwise and the external pull-up (plus the weak internal one in the
-    // .cst) holds the line high. The line value is fed back as the input —
-    // double-flopped, same as uart_rxd_i: the far-end slave is asynchronous
-    // to clk_core, and the engine samples sda_i at phase boundaries, so a
-    // metastable sample would silently corrupt a byte or a false-START
-    // detect. 2 flops per line; released idle is high.
+    // Main-only peripherals' pads (I2C, I2S): released, inputs unused. The
+    // ports stay so the board .cst needs no edit between branches.
     // -----------------------------------------------------------------
-    wire i2c_scl_oe, i2c_sda_oe;
-
-    assign i2c_scl_io = i2c_scl_oe ? 1'b0 : 1'bz;
-    assign i2c_sda_io = i2c_sda_oe ? 1'b0 : 1'bz;
-
-    logic [1:0] i2c_scl_sync_q;
-    logic [1:0] i2c_sda_sync_q;
-
-    always_ff @(posedge clk_core) begin
-        if (!rstn_core) begin
-            i2c_scl_sync_q <= 2'b11;  // released line idles high
-            i2c_sda_sync_q <= 2'b11;
-        end else begin
-            i2c_scl_sync_q <= {i2c_scl_sync_q[0], i2c_scl_io};
-            i2c_sda_sync_q <= {i2c_sda_sync_q[0], i2c_sda_io};
-        end
-    end
-
-    axi4_lite_i2c u_i2c (
-        .clk_i    (clk_core),
-        .rstn_i   (rstn_core),
-        .axi      (axi_bus_i2c.slave),
-        .scl_i    (i2c_scl_sync_q[1]),
-        .sda_i    (i2c_sda_sync_q[1]),
-        .scl_oe_o (i2c_scl_oe),
-        .sda_oe_o (i2c_sda_oe),
-        .i2c_irq_o(i2c_irq)
-    );
+    assign i2c_scl_io  = 1'bz;
+    assign i2c_sda_io  = 1'bz;
+    assign i2s_bclk_io = 1'bz;
+    assign i2s_lrck_io = 1'bz;
 
     // -----------------------------------------------------------------
-    // SPI master (axi4_lite_spi). miso comes off a pin driven by an
-    // external device with its own clock: double-flop it like uart_rxd_i
-    // so a metastable sample never lands in the shift register.
+    // SPI master (axi4_lite_spi). miso double-flopped (asynchronous pin).
     // -----------------------------------------------------------------
     logic [1:0] spi_miso_sync_q;
 
@@ -732,23 +557,9 @@ module top_module (
     );
 
     // -----------------------------------------------------------------
-    // GPIO (axi4_lite_gpio), 4 push-pull header pins.
-    //
-    // Pad glue: the peripheral emits data + a per-pin output enable; the
-    // pad is a tri-state here. The assigns MUST be per-bit — a single
-    // vector `assign gpio_io = gpio_oe ? gpio_out : 4'bz` REDUCES the
-    // 4-bit oe into one condition, so one enabled pin would drive all
-    // four. Inputs are double-flopped like uart_rxd_i / the I2C lines
-    // (header pins are asynchronous to clk_core, and the GPIO's edge
-    // detect samples the synchronized value straight into a comparison).
-    // The sync chain resets high: the .cst gives every pad PULL_MODE=UP,
-    // so a released pin idles 1 and reset does not manufacture a fake
-    // falling edge. A fake RISE per pin is unavoidable at reset with the
-    // pull-up — the peripheral's INT_STATUS comes up showing level-high
-    // pending, masked by INT_EN=0. W1C alone CANNOT clear those bits (a
-    // level-high pin re-pends the cycle after any W1C): firmware must
-    // retype the pin to an edge first, THEN W1C the stale bits, before
-    // arming INT_EN — the order sw/peri/plic_gpio runs.
+    // GPIO (axi4_lite_gpio), 4 push-pull header pins, per-bit tri-state,
+    // inputs double-flopped, sync chain resets high (pulled-up pads). See
+    // `main`'s top_module for the full reset-pend discussion.
     // -----------------------------------------------------------------
     wire [3:0] gpio_out;
     wire [3:0] gpio_oe;
@@ -763,7 +574,7 @@ module top_module (
 
     always_ff @(posedge clk_core) begin
         if (!rstn_core) begin
-            gpio_sync0_q <= 4'hF;  // pulled-up pads idle high
+            gpio_sync0_q <= 4'hF;
             gpio_sync1_q <= 4'hF;
         end else begin
             gpio_sync0_q <= gpio_io;
@@ -784,146 +595,45 @@ module top_module (
     );
 
     // -----------------------------------------------------------------
-    // I2S receiver (axi4_lite_i2s). Either clock role, selected by
-    // CTRL.MASTER: in master mode the peripheral generates BCLK and LRCK
-    // from clk_core and drives the pads (DIV=24 / SLOT=32 gives BCLK =
-    // 1.000 MHz and fs = 15625 Hz exactly, which is what the INMP441 the
-    // guitar tuner uses needs -- that mic is a clock slave and cannot be
-    // driven by another slave); in slave mode it releases them and listens.
-    // Either way it adds no clock domain: the audio bus is OVERSAMPLED in
-    // clk_core, which is why the design still has a single domain and no
-    // CDC. That imposes f(clk_core) >= 4 x f(BCLK) on an external master;
-    // at 50 MHz the limit is 12.5 MHz, against the 3.072 MHz a 48 kHz
-    // 32-bit stereo frame needs.
-    //
-    // All three pads are asynchronous to clk_core, so they are
-    // double-flopped here exactly like uart_rxd_i and the GPIO pads: the
-    // peripheral's contract is that it receives synchronized inputs, and
-    // its edge detect feeds a shift register where a metastable sample
-    // would corrupt a whole word, not just one bit. The chain resets to 0
-    // (an unconnected, undriven bus), which cannot fake a BCLK rising
-    // edge out of reset.
+    // CLINT, SiFive layout (clint.sv): msip / mtip straight into the CPU,
+    // mtime into the time CSR.
     // -----------------------------------------------------------------
-    // Pad glue for the two clock lines. Per-signal tri-state, like the
-    // GPIO pads: drive when the peripheral is the master, release
-    // otherwise. The peripheral ALWAYS samples the pad, never its own
-    // generated net, so master mode and slave mode share one sampler and
-    // the device's SD and our own clocks take the same path back in.
-    wire i2s_bclk_drv;
-    wire i2s_lrck_drv;
-    wire i2s_clk_oe;
-
-    assign i2s_bclk_io = i2s_clk_oe ? i2s_bclk_drv : 1'bz;
-    assign i2s_lrck_io = i2s_clk_oe ? i2s_lrck_drv : 1'bz;
-
-    logic [1:0] i2s_bclk_sync_q;
-    logic [1:0] i2s_lrck_sync_q;
-    logic [1:0] i2s_sd_sync_q;
-
-    always_ff @(posedge clk_core) begin
-        if (!rstn_core) begin
-            i2s_bclk_sync_q <= 2'b00;
-            i2s_lrck_sync_q <= 2'b00;
-            i2s_sd_sync_q   <= 2'b00;
-        end else begin
-            i2s_bclk_sync_q <= {i2s_bclk_sync_q[0], i2s_bclk_io};
-            i2s_lrck_sync_q <= {i2s_lrck_sync_q[0], i2s_lrck_io};
-            i2s_sd_sync_q   <= {i2s_sd_sync_q[0], i2s_sd_i};
-        end
-    end
-
-    axi4_lite_i2s u_i2s (
-        .clk_i       (clk_core),
-        .rstn_i      (rstn_core),
-        .axi         (axi_bus_i2s.slave),
-        .i2s_bclk_i  (i2s_bclk_sync_q[1]),
-        .i2s_lrck_i  (i2s_lrck_sync_q[1]),
-        .i2s_sd_i    (i2s_sd_sync_q[1]),
-        .i2s_bclk_o  (i2s_bclk_drv),
-        .i2s_lrck_o  (i2s_lrck_drv),
-        .i2s_clk_oe_o(i2s_clk_oe),
-        .i2s_irq_o   (i2s_irq)
-    );
-
-    // -----------------------------------------------------------------
-    // PLIC (axi4_lite_plic). Aggregates the peripheral level IRQs into
-    // meip with cause IDs (see the peripheral's header for the claim
-    // contract). irq_i bit i = source ID i, assigned by NAME from the
-    // rv32_pkg PLIC_SRC_* constants (their documented single source of
-    // truth): a renumbered ID or a wider PLIC_SRC_N can never silently
-    // misroute a hand-counted positional concat the way a missed edit in
-    // two files would. Bit 0 (reserved "no source") and the unwired
-    // upper IDs stay 0.
-    // -----------------------------------------------------------------
-    logic [PLIC_SRC_N-1:0] plic_irq;
-    always_comb begin
-        plic_irq                = '0;
-        plic_irq[PLIC_SRC_UART] = uart_irq;
-        plic_irq[PLIC_SRC_I2C]  = i2c_irq;
-        plic_irq[PLIC_SRC_SPI]  = spi_irq;
-        plic_irq[PLIC_SRC_GPIO] = gpio_irq;
-        plic_irq[PLIC_SRC_FFT]  = fft_irq;
-        plic_irq[PLIC_SRC_I2S]  = i2s_irq;
-    end
-
-    // -----------------------------------------------------------------
-    // FFT coprocessor (axi4_lite_fft). No pins: the sample buffers are
-    // the peripheral's own BSRAM, so the only thing that leaves the block
-    // is the DONE interrupt. See axi4_lite_fft.sv for the ping-pong
-    // protocol and the register map.
-    // -----------------------------------------------------------------
-    axi4_lite_fft #(
-        .NMAX    (1024),
-        .LOG2NMAX(10)
-    ) u_fft (
-        .clk_i    (clk_core),
-        .rstn_i   (rstn_core),
-        .axi      (axi_bus_fft.slave),
-        .fft_irq_o(fft_irq)
-    );
-
-    axi4_lite_plic u_plic (
-        .clk_i (clk_core),
-        .rstn_i(rstn_core),
-        .axi   (axi_bus_plic.slave),
-        .irq_i (plic_irq),
-        .meip_o(meip)
-    );
-
-    // -----------------------------------------------------------------
-    // MSIP MMIO slave (machine software interrupt). A write of bit[0]
-    // to MSIP_PERI_ADDR (0x1000_3000) sets/clears mip.MSIP; msip_o feeds
-    // u_cpu.msip_i.
-    // -----------------------------------------------------------------
-    msip_peri u_msip (
-        .clk_i (clk_core),
-        .rstn_i(rstn_core),
-        .axi   (axi_bus_msip.slave),
-        .msip_o(msip)
-    );
-
-    // -----------------------------------------------------------------
-    // CLINT timer MMIO slave (machine timer interrupt). mtip_o = (mtime
-    // >= mtimecmp); feeds u_cpu.mtip_i (mip.MTIP). SW clears it by
-    // writing mtimecmp > mtime.
-    // -----------------------------------------------------------------
-    clint_timer u_timer (
-        .clk_i (clk_core),
-        .rstn_i(rstn_core),
-        .axi   (axi_bus_timer.slave),
+    clint u_clint (
+        .clk_i  (clk_core),
+        .rstn_i (rstn_core),
+        .axi    (axi_bus_clint.slave),
+        .msip_o (msip),
         .mtip_o (mtip),
         .mtime_o(mtime)
     );
 
     // -----------------------------------------------------------------
-    // UART Controller.
-    //
-    // uart_rxd_i comes off a board pin driven by a far-end transmitter with
-    // its own oscillator: asynchronous to clk_core no matter that the fabric
-    // is single-domain. Double-flop it before it reaches the RX sampler --
-    // axi4_lite_uart samples rxd_i straight into its shift register and has
-    // no framing-error flag, so a metastable sample would silently corrupt a
-    // received byte.
+    // PLIC, sifive,plic-1.0.0 (axi4_lite_plic_sifive). Source IDs by NAME
+    // from rv32_pkg; IDs 2 (I2C), 5 (FFT), 6 (I2S) are main-only and tied
+    // off here.
+    // -----------------------------------------------------------------
+    logic [PLIC_SRC_N-1:0] plic_irq;
+    always_comb begin
+        plic_irq                = '0;
+        plic_irq[PLIC_SRC_UART] = uart_irq;
+        plic_irq[PLIC_SRC_SPI]  = spi_irq;
+        plic_irq[PLIC_SRC_GPIO] = gpio_irq;
+    end
+
+    axi4_lite_plic_sifive u_plic (
+        .clk_i (clk_core),
+        .rstn_i(rstn_core),
+        .axi   (axi_bus_plic.slave),
+        .irq_i (plic_irq),
+        .meip_o(meip),
+        .seip_o(seip_unused)
+    );
+
+    // -----------------------------------------------------------------
+    // UART, 16550-compatible (axi4_lite_uart16550). DL resets to
+    // UART_CLK_HZ / (16 * UART_BAUD) = 27 at 50 MHz / 115200 (115 741 baud,
+    // +0.47%); Linux reprograms it from the DT clock-frequency (50 MHz).
+    // uart_rxd_i double-flopped: asynchronous far-end transmitter.
     // -----------------------------------------------------------------
     logic [1:0] uart_rxd_sync_q;
 
@@ -935,16 +645,15 @@ module top_module (
         end
     end
 
-    axi4_lite_uart #(
+    axi4_lite_uart16550 #(
         .CLK_FREQ_HZ(rv32_pkg::UART_CLK_HZ),
         .BAUD_RATE  (rv32_pkg::UART_BAUD)
     ) uart_i (
-        .clk_i (clk_core),
-        .rstn_i(rstn_core),
-        .axi   (axi_bus_uart.slave),
-        .txd_o (uart_txd_o),
-        .rxd_i (uart_rxd_sync_q[1]),
-
+        .clk_i     (clk_core),
+        .rstn_i    (rstn_core),
+        .axi       (axi_bus_uart.slave),
+        .txd_o     (uart_txd_o),
+        .rxd_i     (uart_rxd_sync_q[1]),
         .uart_irq_o(uart_irq)
     );
 

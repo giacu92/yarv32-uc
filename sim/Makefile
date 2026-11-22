@@ -28,21 +28,16 @@ RTL := \
 	../src/rtl/core/rv32imac_zicsr_zifencei.sv \
 	../src/rtl/utils/native_ram.sv \
 	mem_fuzz.sv \
-	../src/rtl/utils/msip_peri.sv \
-	../src/rtl/utils/clint_timer.sv \
-	../src/rtl/utils/axi4_lite_uart.sv \
-	../src/rtl/utils/axi4_lite_i2c.sv \
+	../src/rtl/utils/clint.sv \
+	../src/rtl/utils/axi4_lite_uart16550.sv \
 	../src/rtl/utils/axi4_lite_spi.sv \
 	../src/rtl/utils/axi4_lite_gpio.sv \
-	../src/rtl/utils/axi4_lite_plic.sv \
-	../src/rtl/utils/fft_dpram.sv \
-	../src/rtl/utils/fft_twiddle_rom.sv \
-	../src/rtl/utils/axi4_lite_fft.sv \
-	../src/rtl/utils/axi4_lite_i2s.sv \
-	i2c_slave_model.sv \
-	i2s_master_model.sv \
-	i2s_mic_model.sv \
+	../src/rtl/utils/axi4_lite_plic_sifive.sv \
 	sim_top.sv
+# linux-soc (M8): the MCU peripherals msip_peri / clint_timer / axi4_lite_uart /
+# axi4_lite_plic and the main-only I2C / FFT / I2S blocks (with their sim
+# models) are not part of this top. Their standalone TBs under sim/hw still
+# build them from their own source lists.
 
 # Harvard topology: native u_imem (read-only) + u_dmem (byte-strobed) on
 # dedicated CPU ports, AXI only for peripherals (msip_peri + clint_timer
@@ -114,7 +109,7 @@ run: $(TOP)
 # uart_echo is special-cased at the end: it needs UART_RX stimulus, and its
 # pass condition is the "GOOD" its firmware transmits, not a memory word.
 REGRESS_TESTS := \
-	quicksort:quicksort/build:400000:trace:x10=600d \
+	quicksort:quicksort/build:1500000:trace:x10=600d \
 	bp_pred:isa/bp_pred/build:20000:probe@0x2000=600d \
 	mul_ops:isa/mul_ops/build:20000:probe@0x2000=600d \
 	csr_ops:isa/csr_ops/build:20000:probe@0x2000=600d \
@@ -129,12 +124,10 @@ REGRESS_TESTS := \
 	wfi_trap:intr/wfi_trap/build:20000:probe@0x2000=600d \
 	timer:intr/timer/build:20000:probe@0x2000=600d \
 	plic_gpio:peri/plic_gpio/build:200000:probe@0x3000=600d \
-	fft:peri/fft/build:200000:probe@0x3000=600d \
-	guitar_tuner:guitar_tuner/build-sim:5000000:probe@0x3000=600d \
-	i2c_reg:peri/i2c_reg/build:1000000:probe@0x3000=600d \
-	spi_loop:peri/spi_loop/build:400000:probe@0x3000=600d \
-	i2c_scan:peri/i2c_scan/build:5000000:probe@0x3000=600d \
-	i2s:peri/i2s/build:400000:probe@0x3000=600d
+	spi_loop:peri/spi_loop/build:400000:probe@0x3000=600d
+# linux-soc (M8): fft, guitar_tuner, i2c_reg, i2c_scan and i2s are NOT run
+# here -- the FFT, I2S and I2C peripherals are main-only and are not in this
+# branch's tops. They stay in `main`'s REGRESS_TESTS.
 
 # ----------------------------------------------------------------------
 # lint — dead wires, unread bits, unused parameters

@@ -48,10 +48,13 @@
  * never stick. */
 #define INT_TYPE_RISE_ALL 0x55u
 
-#define PLIC_BASE 0x10008000u
-#define PLIC_PENDING (*(volatile uint32_t *)(PLIC_BASE + 0x00))
-#define PLIC_ENABLE  (*(volatile uint32_t *)(PLIC_BASE + 0x04))
-#define PLIC_CLAIM   (*(volatile uint32_t *)(PLIC_BASE + 0x08))
+/* linux-soc (M8): sifive,plic-1.0.0 layout, context 0 (M-mode). */
+#define PLIC_BASE 0x10400000u
+#define PLIC_PRIORITY(id) (*(volatile uint32_t *)(PLIC_BASE + 4u * (id)))
+#define PLIC_PENDING (*(volatile uint32_t *)(PLIC_BASE + 0x1000u))
+#define PLIC_ENABLE  (*(volatile uint32_t *)(PLIC_BASE + 0x2000u))
+#define PLIC_THRESHOLD (*(volatile uint32_t *)(PLIC_BASE + 0x200000u))
+#define PLIC_CLAIM   (*(volatile uint32_t *)(PLIC_BASE + 0x200004u))
 
 /* Source IDs (rv32_pkg::PLIC_SRC_*). */
 #define PLIC_SRC_GPIO 4u
@@ -104,10 +107,9 @@ __attribute__((interrupt("machine"), aligned(4))) void trap_handler(void)
         return;
     }
 
-    /* CAUSE/CLAIM contract: the lowest-ID enabled pending source. With
-     * only GPIO armed, anything but PLIC_SRC_GPIO is a wiring or decode
-     * bug. CLAIM is a pure priority read -- completing the claim is the
-     * source's own job, done by the W1C below. */
+    /* CLAIM: the highest-priority eligible source. With only GPIO armed,
+     * anything but PLIC_SRC_GPIO is a wiring or decode bug. The claim takes
+     * the source out of service until the COMPLETE below (gateway). */
     claim_id = PLIC_CLAIM;
     if (claim_id != PLIC_SRC_GPIO) {
         bad_claim = claim_id;
@@ -118,6 +120,7 @@ __attribute__((interrupt("machine"), aligned(4))) void trap_handler(void)
      * The pin is still driven high, but the type is rise, so no new
      * edge pends -- the level that the sticky bit recorded is gone. */
     GPIO_INT_STATUS = 0x1u;
+    PLIC_CLAIM = claim_id;  /* COMPLETE */
 
     irq_seen = irq_seen + 1;
 }
@@ -152,11 +155,13 @@ int main(void)
 
     GPIO_INT_EN = 0x1u;
 
-    /* Enable the GPIO source in the PLIC explicitly. ENABLE resets
-     * all-ones (the drop-in-for-the-OR contract), so read-modify-write
-     * must see the reset value AND keep the bit -- it also proves the
-     * PLIC window decodes. */
+    /* Enable the GPIO source in the PLIC: priority 1 > threshold 0 and the
+     * context-0 enable bit, which is what Linux's plic_irq_unmask() does.
+     * Everything resets to 0 on this PLIC, so the read-back proves the
+     * window decodes. */
     {
+        PLIC_THRESHOLD = 0u;
+        PLIC_PRIORITY(PLIC_SRC_GPIO) = 1u;
         uint32_t en = PLIC_ENABLE;
         PLIC_ENABLE = en | (1u << PLIC_SRC_GPIO);
         if (!(PLIC_ENABLE & (1u << PLIC_SRC_GPIO))) {

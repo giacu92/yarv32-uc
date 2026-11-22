@@ -202,20 +202,47 @@ package rv32_pkg;
     // is unmapped too, so the FFT's 8 KiB window stays 8 KiB aligned. An
     // access to either gets a DECERR from the peri xbar.
     // ---------------------------------------------------------------
+    // ===============================================================
+    // LINUX-BRANCH PERIPHERAL MAP (linux-soc, M8, 2026-11-22). Five
+    // windows, every one at an offset a mainline driver already knows, so
+    // Linux and OpenSBI need no driver of ours:
+    //
+    //   0x1000_0000  4 KiB  UART   axi4_lite_uart16550  "ns16550a",
+    //                                reg-shift 2, reg-io-width 4
+    //   0x1000_6000  4 KiB  SPI    axi4_lite_spi        (boot loader only)
+    //   0x1000_7000  4 KiB  GPIO   axi4_lite_gpio       (debug LEDs)
+    //   0x1001_0000 64 KiB  CLINT  clint                "sifive,clint0"
+    //                                msip +0, mtimecmp +0x4000, mtime +0xBFF8
+    //   0x1040_0000  4 MiB  PLIC   axi4_lite_plic_sifive "sifive,plic-1.0.0"
+    //
+    // Each window is aligned to its own size (CLINT 64 KiB, PLIC 4 MiB), so
+    // a window's offset is simply addr[size-1:0]. Everything else in
+    // 0x1000_0000..0x1FFF_FFFF is unmapped and DECERRs, including
+    // 0x1000_4000 (sw/isa/amo_ops relies on that hole).
+    //
+    // Dropped from this branch per the owner's decision (they stay on
+    // `main`): the MCU CLINT pair (MTIMER @0x1000_1000 + MSIP @0x1000_3000),
+    // the MCU PLIC (@0x1000_8000), I2C, the FFT coprocessor and the I2S
+    // receiver. Their constants below are kept only so the unused source
+    // files still elaborate; no top instantiates them here.
+    // ===============================================================
     localparam logic [XLEN-1:0] UART_BASE = 32'h1000_0000;
     localparam logic [XLEN-1:0] UART_SIZE = 32'h0000_1000;
+    localparam logic [XLEN-1:0] SPI_BASE = 32'h1000_6000;
+    localparam logic [XLEN-1:0] SPI_SIZE = 32'h0000_1000;
+    localparam logic [XLEN-1:0] GPIO_BASE = 32'h1000_7000;
+    localparam logic [XLEN-1:0] GPIO_SIZE = 32'h0000_1000;
+    localparam logic [XLEN-1:0] CLINT_BASE = 32'h1001_0000;
+    localparam logic [XLEN-1:0] CLINT_SIZE = 32'h0001_0000;
+    localparam logic [XLEN-1:0] PLIC_BASE = 32'h1040_0000;
+    localparam logic [XLEN-1:0] PLIC_SIZE = 32'h0040_0000;
+    // --- main-only peripherals, NOT instantiated on linux-soc ---
     localparam logic [XLEN-1:0] MTIMER_BASE = 32'h1000_1000;
     localparam logic [XLEN-1:0] MTIMER_SIZE = 32'h0000_2000;
     localparam logic [XLEN-1:0] MSIP_PERI_ADDR = 32'h1000_3000;
     localparam logic [XLEN-1:0] MSIP_PERI_SIZE = 32'h0000_1000;
     localparam logic [XLEN-1:0] I2C_BASE = 32'h1000_5000;
     localparam logic [XLEN-1:0] I2C_SIZE = 32'h0000_1000;
-    localparam logic [XLEN-1:0] SPI_BASE = 32'h1000_6000;
-    localparam logic [XLEN-1:0] SPI_SIZE = 32'h0000_1000;
-    localparam logic [XLEN-1:0] GPIO_BASE = 32'h1000_7000;
-    localparam logic [XLEN-1:0] GPIO_SIZE = 32'h0000_1000;
-    localparam logic [XLEN-1:0] PLIC_BASE = 32'h1000_8000;
-    localparam logic [XLEN-1:0] PLIC_SIZE = 32'h0000_1000;
     // FFT coprocessor: 8 KiB, the only window in the map that is not 4 KiB.
     // It needs two 4 KiB pages -- CSR at +0x0000, the DATA view of the
     // CPU-owned sample buffer at +0x1000 (1024 complex words) -- and the

@@ -452,7 +452,12 @@ module rv32imac_zicsr_zifencei #(
         .ex_pc_o             (ex_pc),
         .ex_instr_o          (ex_instr),
         .ex_valid_o          (ex_valid),
-        .commit_o            (ex_commit)
+        .commit_o            (ex_commit),
+        // No cache yet: the BSRAM memories are always coherent for fence.i's
+        // purposes, so the ack is immediate and fence.i is a pipeline flush
+        // + refetch. The Linux SoC top replaces this with the cache's ack.
+        .fencei_req_o        (),
+        .fencei_ack_i        (1'b1)
     );
 
     // Branch predictor (gshare PHT + GHR + RAS). Decode queries it for the

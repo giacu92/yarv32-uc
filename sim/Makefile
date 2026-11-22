@@ -120,6 +120,7 @@ REGRESS_TESTS := \
 	csr_ops:isa/csr_ops/build:20000:probe@0x2000=600d \
 	amo_ops:isa/amo_ops/build:20000:probe@0x2000=600d \
 	amo_stress:amo_stress/build:400000:trace:x10=600d \
+	fencei_ops:isa/fencei_ops/build:20000:probe@0x2000=600d \
 	div_ops:isa/div_ops/build:20000:probe@0x2000=600d \
 	rvc_scramble:isa/rvc_scramble/build:20000:probe@0x2000=600d \
 	span_target:isa/span_target/build:20000:probe@0x2000=600d \

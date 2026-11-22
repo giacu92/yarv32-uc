@@ -172,7 +172,16 @@ module execute_stage #(
     // cycle late, so a csrr right after an instruction misses that
     // instruction and a minstret write cannot suppress its own count
     // (rv32mi-instret_overflow case 3).
-    output wire commit_o
+    output wire commit_o,
+
+    // fence.i handshake to the memory system (2026-11-22, M7). execute holds
+    // the fence.i in EX_FENCEI with fencei_req_o high until fencei_ack_i, then
+    // retires it and redirects fetch to pc+4, which kills every instruction
+    // fetched before the fence. Behind a write-back cache the ack means
+    // "dirty D-lines written back and I-cache invalidated"; with the BSRAM
+    // memories the CPU top ties it to 1 (the flush + refetch is still done).
+    output wire fencei_req_o,
+    input  wire fencei_ack_i
 );
 
     // =================================================================
@@ -335,6 +344,8 @@ module execute_stage #(
     logic is_csr_op;
     assign is_csr_op = de_i.csr_wren;
 
+    wire  is_fencei_op = (de_i.sys_op == SYS_FENCE_I);
+
     logic csr_start;
     logic csr_ready;
 
@@ -371,7 +382,8 @@ module execute_stage #(
         EX_MEM_TRAP,
         EX_DIV_BUSY,
         EX_MEM_WAIT,
-        EX_CSR_WAIT
+        EX_CSR_WAIT,
+        EX_FENCEI
     } ex_state_e;
     ex_state_e ex_state_q, ex_state_d;
 
@@ -603,13 +615,24 @@ module execute_stage #(
     // freeze; mem_launch_state and EX_MEM_TRAP are states; store_done is the
     // captured handshake. Keeping the live EA out of this expression is what
     // the store capture exists for.
+    // fence.i: EX_IDLE -> EX_FENCEI, hold the request until the memory
+    // system acks, then retire + redirect to pc_link. Every term is a flop or
+    // the ack, so the redirect it adds to branch_valid_o is flop-derived.
+    logic fencei_start;
+    assign fencei_start = de_i.valid & is_fencei_op &
+        (ex_state_q == EX_IDLE) & ~freeze & ~trap_redirect_req;
+    wire fencei_done = (ex_state_q == EX_FENCEI) & de_i.valid & fencei_ack_i;
+    assign fencei_req_o = (ex_state_q == EX_FENCEI);
+
     assign
         stall_o = alu_start | div_running | ((mem_req_pending | mem_launch_state) & ~store_done) |
-        (ex_state_q == EX_MEM_TRAP) | mem_running | csr_start | stall_i | wfi_stall;
+        (ex_state_q == EX_MEM_TRAP) | mem_running | csr_start | stall_i | wfi_stall | fencei_start |
+        ((ex_state_q == EX_FENCEI) & ~fencei_ack_i);
 
     assign
         csr_start = de_i.valid & is_csr_op & (ex_state_q == EX_IDLE) & ~freeze & ~trap_redirect_req;
     assign csr_ready = (ex_state_q == EX_CSR_WAIT);
+
 
     always_comb begin
         ex_state_d = ex_state_q;
@@ -625,8 +648,10 @@ module execute_stage #(
                 // accepted -> stay here and re-drive (de_i is held).
                 else if (dmem_load_hs) ex_state_d = EX_MEM_WAIT;
                 else if (csr_start) ex_state_d = EX_CSR_WAIT;
+                else if (fencei_start) ex_state_d = EX_FENCEI;
             end
             EX_CSR_WAIT: ex_state_d = EX_IDLE;
+            EX_FENCEI: if (fencei_ack_i) ex_state_d = EX_IDLE;
             EX_MEM_LAUNCH:
             // Hold the request until the slave accepts it; then a load waits
             // for its data and a (posted) store has already retired. With
@@ -856,7 +881,8 @@ module execute_stage #(
     // cycle it was issued. Stores have reg_write=0 so their result_ready is
     // don't-care for the regfile write.
     logic result_ready;
-    assign result_ready = is_mem_op ? mem_op_done : (is_csr_op ? csr_ready : alu_result_valid);
+    assign result_ready = is_mem_op ? mem_op_done :
+        is_csr_op ? csr_ready : is_fencei_op ? fencei_done : alu_result_valid;
 
     // Two terms this used to carry are provably redundant, and both sat on the
     // path that ends in decode's forward mux:
@@ -865,7 +891,7 @@ module execute_stage #(
     //   ~misaligned_trap : misaligned_trap is a term OF sync_trap_req, which
     //                      is a term OF trap_redirect_req, so
     //                      ~trap_redirect_req implies it.
-    assign wb_en_o      = de_i.valid & de_i.reg_write & ~freeze & result_ready & ~trap_redirect_req;
+    assign wb_en_o = de_i.valid & de_i.reg_write & ~freeze & result_ready & ~trap_redirect_req;
 
     // =================================================================
     // CSR read-modify-write (Zicsr). The old CSR value is csr_rdata_i
@@ -1296,7 +1322,10 @@ module execute_stage #(
     // trap unit's redirect_addr wins when a trap/mret/interrupt fires; else the
     // resolved target (taken) or the sequential pc_link (a predicted-taken
     // branch that turned out not-taken).
-    assign branch_valid_o = mispredict | trap_redirect_req;
+    // fence.i adds a third source: its retire redirects to pc_link. It needs
+    // no new address -- a fence.i has branch_type BR_NONE, so branch_taken is
+    // 0 and the existing mux already yields pc_link.
+    assign branch_valid_o = mispredict | trap_redirect_req | fencei_done;
     assign branch_addr_o = trap_redirect_req ?
         trap_redirect_addr_i : (branch_taken ? branch_target : pc_link);
     assign flush_o = branch_valid_o;

@@ -19,7 +19,7 @@
  *   8  mcycleh is writable and reads back (and cycleh mirrors it).
  *   9  instreth mirrors minstreth.
  *  10  time advances, and tracks the CLINT mtime MMIO register at
- *      0x1000_1000 within 64 cycles (time is mtime, not a counter of its
+ *      0x1001_BFF8 within 64 cycles (time is mtime, not a counter of its
  *      own).
  *  11  timeh == the CLINT mtime_hi MMIO register.
  *  12  csrr of an unimplemented CSR (satp, 0x180) traps: mcause 2, mtval =
@@ -129,7 +129,7 @@ _start:
     csrr    a1, time
     li      s11, 10
     bgeu    a0, a1, bad
-    li      t2, 0x10001000
+    li      t2, 0x1001BFF8         /* CLINT mtime (linux-soc) */
     lw      a0, 0(t2)              /* mtime_lo */
     csrr    a1, time
     sub     a2, a1, a0

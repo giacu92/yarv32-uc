@@ -9,8 +9,8 @@
  *   1. Set sp / mtvec (direct mode), enable mie.MTIE + mstatus.MIE.
  *   2. Arm the timer: write mtimecmp = 200 (mtime counts from 0 every
  *      cycle, so mtime >= 200 fires ~cycle 200; margin past the ~30-cycle
- *      setup so MTIP stays low until armed). mtimecmp_lo @ 0x1000_1008,
- *      mtimecmp_hi @ 0x1000_100C.
+ *      setup so MTIP stays low until armed). mtimecmp_lo @ 0x1001_4000 (SiFive CLINT, linux-soc),
+ *      mtimecmp_hi @ 0x1001_4004.
  *   3. wfi -- halts. The pending+enabled machine timer interrupt wakes
  *      WFI (mepc = wfi+4, set by the trap unit's WFI-wake path).
  *   4. Handler: stores the masked mcause code (7) as a marker at D-mem
@@ -44,7 +44,7 @@ _start:
     /* ---- arm the timer: mtimecmp = 200 ---- */
     /* Write the high half first (0), so mtimecmp is huge until the low
      * half lands -- no transient MTIP. mtimecmp_hi @ +0xC, lo @ +0x8. */
-    li      t0, 0x10001008      /* mtimecmp base (MTIMER_BASE + 8) */
+    li      t0, 0x10014000      /* mtimecmp (CLINT_BASE + 0x4000) */
     sw      x0, 4(t0)           /* mtimecmp_hi = 0 */
     li      t1, 200
     sw      t1, 0(t0)           /* mtimecmp_lo = 200  -> mtimecmp = 200 */
@@ -93,7 +93,7 @@ int_path:
 
     /* Clear MTIP: mtimecmp = 0xFFFFFFFF_FFFFFFFF (mtime stays tiny, so
      * mtime < mtimecmp -> MTIP=0). Write hi first then lo. */
-    li      t4, 0x10001008
+    li      t4, 0x10014000
     li      t5, -1
     sw      t5, 4(t4)          /* mtimecmp_hi = 0xFFFFFFFF */
     sw      t5, 0(t4)          /* mtimecmp_lo = 0xFFFFFFFF */

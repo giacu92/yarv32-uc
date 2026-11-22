@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include "uart.h"
+#include "plic.h"
 
 /*
  * UART echo + external-interrupt (MEIP) oracle.
@@ -26,8 +27,9 @@
  * broken while the data path works.
  */
 
-#define UART_CTRL (*(volatile unsigned int *)(UART_BASE + 0x0C))
-#define CTRL_RX_IE 0x2u
+/* linux-soc (M8): 16550 UART -- the RX interrupt enable is IER.RDI. */
+#define UART_CTRL UART_IER
+#define CTRL_RX_IE UART_IER_RDI
 
 #define MSTATUS_MIE (1u << 3)
 #define MIE_MEIE    (1u << 11)
@@ -39,8 +41,8 @@
 #define MIE_MSIE (1u << 3)
 #define MIP_MSIP (1u << 3)
 
-/* msip_peri: writing bit0 sets/clears mip.MSIP. */
-#define MSIP_REG (*(volatile unsigned int *)0x10003000u)
+/* SiFive CLINT msip[0] (linux-soc): writing bit0 sets/clears mip.MSIP. */
+#define MSIP_REG (*(volatile unsigned int *)0x10010000u)
 
 #define PHASE_CHARS 4
 
@@ -186,13 +188,18 @@ __attribute__((interrupt("machine"), aligned(4))) void trap_handler(void)
         return;
     }
 
-    /* Drain the RX FIFO. The IRQ is level-sensitive: leaving a byte queued
-     * would re-enter the handler immediately (correct, but pointless). */
+    /* linux-soc PLIC (sifive,plic-1.0.0): claim, service, complete. The
+     * gateway keeps the source out of service until the complete, so a
+     * handler that skipped it would never see the UART again. Drain the RX
+     * FIFO before completing: the UART IRQ is a level, and a byte still
+     * queued at the complete re-pends the source at once. */
+    unsigned int src = plic_claim();
     while (UART_STATUS & UART_RX_READY_BIT) {
         char c = (char)(UART_RXDATA & 0xFF);
         uart_putc(c);
         irq_chars = irq_chars + 1;
     }
+    if (src) plic_complete(src);
     uart_putc('X');
 }
 
@@ -267,6 +274,7 @@ int main(void)
      *       path.
      */
     UART_CTRL = CTRL_RX_IE;
+    plic_enable(PLIC_SRC_UART);  /* the sifive PLIC resets everything to 0 */
     __asm__ volatile("csrw mtvec, %0" ::"r"((uint32_t)&trap_handler));
     __asm__ volatile("csrs mie, %0" ::"r"(MIE_MEIE));
 

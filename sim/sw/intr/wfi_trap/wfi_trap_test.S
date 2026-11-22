@@ -23,8 +23,8 @@
  *   1. Set sp / mtvec (direct mode), enable mie.MTIE + mstatus.MIE.
  *   2. Arm the timer: mtimecmp = 400 (mtime counts from 0 every cycle;
  *      400 is comfortably past this setup code, so MTIP stays low until
- *      the wfi is actually reached). mtimecmp_lo @ 0x1000_1008,
- *      mtimecmp_hi @ 0x1000_100C.
+ *      the wfi is actually reached). mtimecmp_lo @ 0x1001_4000 (SiFive CLINT, linux-soc),
+ *      mtimecmp_hi @ 0x1001_4004.
  *   3. wfi -- halts until MTIP wakes it.
  *   4. The word at wfi+4 is an illegal encoding (0x0000007f). On the wake
  *      it takes an illegal-instruction trap (mcause=2) with mepc = wfi+4
@@ -67,7 +67,7 @@ _start:
     /* ---- arm the timer: mtimecmp = 400 ----
      * Write the high half first (0) so mtimecmp stays huge until the low
      * half lands -- no transient MTIP. mtimecmp_hi @ +0xC, lo @ +0x8. */
-    li      t0, 0x10001008       /* mtimecmp base (MTIMER_BASE + 8) */
+    li      t0, 0x10014000       /* mtimecmp (CLINT_BASE + 0x4000) */
     sw      x0, 4(t0)            /* mtimecmp_hi = 0 */
     li      t1, 400
     sw      t1, 0(t0)            /* mtimecmp_lo = 400 -> mtimecmp = 400 */
@@ -139,7 +139,7 @@ int_path:
 
     /* Clear MTIP: mtimecmp = 0xFFFFFFFF_FFFFFFFF (mtime stays small, so
      * mtime < mtimecmp -> MTIP=0). Write hi first, then lo. */
-    li      t4, 0x10001008
+    li      t4, 0x10014000
     li      t5, -1
     sw      t5, 4(t4)            /* mtimecmp_hi = 0xFFFFFFFF */
     sw      t5, 0(t4)            /* mtimecmp_lo = 0xFFFFFFFF */

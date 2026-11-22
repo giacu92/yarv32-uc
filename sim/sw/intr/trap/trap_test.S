@@ -10,7 +10,7 @@
  *                     the faulting lw (mepc+4) and returns past it.
  *   3. .word 0      -> illegal instruction, mcause=2. Handler skips it.
  *   4. MMIO write   -> sets MSIP (mip.MSIP) via the peri slave at
- *      + wfi          0x1000_3000 (MSIP_PERI_ADDR), then WFI halts. The pending+enabled
+ *      + wfi          0x1001_0000 (CLINT msip, linux-soc), then WFI halts. The pending+enabled
  *                     machine software interrupt wakes WFI (mepc = wfi+4),
  *                     handler clears MSIP, mret returns past WFI.
  *
@@ -57,7 +57,7 @@ _start:
     /* handler returns here */
 
     /* ---- test 4: MSIP self-write + WFI wake ---- */
-    li      t0, 0x10003000      /* MSIP MMIO register (MSIP_PERI_ADDR) */
+    li      t0, 0x10010000      /* CLINT msip[0] (CLINT_BASE + 0), linux-soc */
     li      t1, 1
     sw      t1, 0(t0)           /* set MSIP -> mip.MSIP */
     wfi                        /* halt; interrupt wakes -> handler -> mret -> here
@@ -121,7 +121,7 @@ int_path:
     /* machine software interrupt: clear MSIP, mark, return. mepc is
      * already wfi+4 (set by the trap unit's WFI-wake path) -- do NOT
      * advance it. */
-    li      t4, 0x10003000
+    li      t4, 0x10010000
     sw      x0, 0(t4)          /* clear MSIP */
     li      t3, 0x2000
     li      t5, 0x44

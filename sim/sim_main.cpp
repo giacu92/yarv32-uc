@@ -109,7 +109,7 @@ public:
     // (UART_BIT_CYCLES env, paired with -GUART_CLK_HZ / -GUART_BAUD).
     static int bit_cycles() {
         const char *e = getenv("UART_BIT_CYCLES");
-        return e ? atoi(e) : 5;
+        return e ? atoi(e) : 16;  // linux-soc 16550: 16 x DL clocks, DL = 1
     }
     static const int GAP_CYCLES = 10;  // idle-high clocks between frames
 

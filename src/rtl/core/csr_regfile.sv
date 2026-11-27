@@ -101,7 +101,14 @@ module csr_regfile (
     // Instruction retire stat (consumed by minstret). Future
     // mhpmcounter / branch-prediction counters would add their own
     // retire-side inputs here when implemented.
-    input wire instr_retire_i  // instruction retired (commit)
+    input wire instr_retire_i,  // instruction retired (commit)
+
+    // Current privilege (linux-soc: M and U only, no S). One flop, written
+    // by the trap unit on trap entry (-> M) and on mret (-> mstatus.MPP).
+    // 1 = M, 0 = U. Resets to M.
+    input  wire priv_we_i,
+    input  wire priv_d_i,
+    output wire priv_m_o
 );
     // Index map: implemented CSRs packed into a 9-entry array. The case
     // statements below translate the 12-bit CSR address to/from this index.
@@ -138,7 +145,11 @@ module csr_regfile (
     // a real A implementation. Guarded by sw/isa/csr_ops.
     // mstatus resets with MPP = 2'b11 (M): only M-mode is implemented, so
     // MPP is effectively read-only 11 (see MSTATUS_RESET in rv32_pkg).
-    localparam logic [XLEN-1:0] MISA_RESET = 32'h4000_2105;
+    // linux-soc, 2026-11-27: U-mode is implemented (bit 20). A nommu M-mode
+    // Linux kernel runs userspace in U (start_thread clears MPP) and only
+    // handles ecall cause 8, so M-only cannot run a single syscall.
+    localparam logic [XLEN-1:0] MISA_RESET = 32'h4010_2105;
+    logic priv_m_q;
 
     always_comb begin
         case (csr_addr_i)
@@ -167,6 +178,7 @@ module csr_regfile (
 
     always_ff @(posedge clk_i) begin
         if (!rstn_i) begin
+            priv_m_q    <= 1'b1;
             mcycleh_q   <= '0;
             minstreth_q <= '0;
             for (int i = 0; i < NCSR; i++) begin
@@ -195,6 +207,8 @@ module csr_regfile (
                 minstreth_q <= minstret_inc[63:32];
             end
 
+            if (priv_we_i) priv_m_q <= priv_d_i;
+
             // --- Trap-write bundle (one cycle, each a distinct CSR).
             // Priority over the RMW port: a trap suppresses the RMW this
             // cycle, so they never collide, but the trap port wins anyway. ---
@@ -203,11 +217,16 @@ module csr_regfile (
             if (we_mcause_i) regs[6] <= d_mcause_i;
             if (we_mtval_i) regs[7] <= d_mtval_i;
 
-            // --- mstatus RMW (only if no trap write). Only M-mode is
-            // implemented, so MPP is WARL-forced to 2'b11 (M) on any write;
-            // the other bits are taken raw (M-mode code is trusted). ---
+            // --- mstatus RMW (only if no trap write). M and U exist, so
+            // MPP is WARL {00, 11}: 00 stays U, anything else (including the
+            // unsupported S encoding 01) reads back M. Other bits raw (only
+            // M-mode can write mstatus). ---
             if (!we_mstatus_i && csr_wren_i && (csr_addr_i == CSR_ADDR_MSTATUS))
-                regs[0] <= {csr_data_i[31:13], MSTATUS_MPP_M, csr_data_i[10:0]};
+                regs[0] <= {
+                    csr_data_i[31:13],
+                    (csr_data_i[12:11] == MSTATUS_MPP_U) ? MSTATUS_MPP_U : MSTATUS_MPP_M,
+                    csr_data_i[10:0]
+                };
 
             // --- mtvec RMW: BASE in [31:2] raw; MODE masked to direct /
             // vectored only ({1'b0, bit[0]} — bit[1] cleared, other modes
@@ -275,6 +294,7 @@ module csr_regfile (
     assign mstatus_o  = regs[0];
     assign mip_o      = regs[8];
     assign mie_o      = regs[2];
+    assign priv_m_o   = priv_m_q;
 
 `ifdef VERILATOR
     // Sim-only: mirror the reset values at time 0 so waveforms/logs do not
@@ -293,6 +313,7 @@ module csr_regfile (
         regs[10]    = '0;
         mcycleh_q   = '0;
         minstreth_q = '0;
+        priv_m_q    = 1'b1;
     end
 `endif
 

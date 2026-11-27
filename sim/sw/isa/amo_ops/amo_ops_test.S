@@ -170,7 +170,7 @@ _start:
 
     /* ---- 29: misa now advertises A ---- */
     csrr    t3, misa
-    EXPECT  29, t3, 0x40002105
+    EXPECT  29, t3, 0x40102105
 
     /* ===== all checks passed ===== */
     li      t0, 0x2000

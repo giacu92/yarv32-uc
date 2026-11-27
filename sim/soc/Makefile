@@ -71,3 +71,6 @@ clean:
 regress: $(TOP)
 	python3 regress.py
 .PHONY: regress
+compliance: $(TOP)
+	python3 compliance.py
+.PHONY: compliance

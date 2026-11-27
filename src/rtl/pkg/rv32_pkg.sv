@@ -577,6 +577,7 @@ package rv32_pkg;
     localparam logic [XLEN-1:0] MCAUSE_SAD_MIS = 32'h0000_0006;  // store/AMO addr misaligned
     localparam logic [XLEN-1:0] MCAUSE_SAD_ACC = 32'h0000_0007;  // store/AMO access fault
     localparam logic [XLEN-1:0] MCAUSE_ECALL_M = 32'h0000_000B;  // env call from M-mode (11)
+    localparam logic [XLEN-1:0] MCAUSE_ECALL_U = 32'h0000_0008;  // env call from U-mode (8)
     localparam logic [XLEN-1:0] MCAUSE_MSI = 32'h8000_0003;  // machine software interrupt
     localparam logic [XLEN-1:0] MCAUSE_MTI = 32'h8000_0007;  // machine timer interrupt
     localparam logic [XLEN-1:0] MCAUSE_MEI = 32'h8000_000B;  // machine external interrupt
@@ -586,8 +587,10 @@ package rv32_pkg;
     localparam int MSTATUS_MPIE_BIT = 7;  // prior MIE (saved on trap entry)
     localparam int MSTATUS_MPP_LO = 11;  // MPP[1:0]: 00=U, 01=S, 11=M
     localparam int MSTATUS_MPP_HI = 12;
-    // Only M-mode is implemented, so MPP is effectively read-only 2'b11.
+    // linux-soc: M and U are implemented (no S), so MPP is WARL {00, 11}.
+    // (On `main` only M exists and MPP is read-only 2'b11.)
     localparam logic [1:0] MSTATUS_MPP_M = 2'b11;
+    localparam logic [1:0] MSTATUS_MPP_U = 2'b00;
     // mstatus reset value: MPP = M, everything else 0 (MIE=0, MPIE=0).
     localparam logic [XLEN-1:0] MSTATUS_RESET = 32'h0000_1800;
 

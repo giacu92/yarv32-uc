@@ -125,8 +125,17 @@ public:
         return e ? atoi(e) != 0 : true;
     }
 
+    // UART_RX_START=<cycles>: hold the line idle that long before the first
+    // frame, so input meant for a program that only starts listening late
+    // (a kernel's shell) is not shipped while the receiver is still unset.
+    static long start_cycles() {
+        const char *e = getenv("UART_RX_START");
+        return e ? atol(e) : 0;
+    }
+
     explicit UartRxDriver(std::string bytes)
-        : bytes_(std::move(bytes)), bit_cycles_(bit_cycles()), paced_(paced()) {}
+        : bytes_(std::move(bytes)), bit_cycles_(bit_cycles()), paced_(paced()),
+          gap_(start_cycles()) {}
 
     bool done() const { return idx_ >= (int)bytes_.size() && !active_; }
     int  sent() const { return idx_ - (active_ ? 1 : 0); }
@@ -168,7 +177,7 @@ private:
     uint8_t     cur_    = 0;
     int         bit_    = 0;
     int         cnt_    = 0;
-    int         gap_    = 0;
+    long        gap_    = 0;
 };
 
 // Decode C-style escapes in the UART_RX env string so a shell can pass

@@ -106,6 +106,9 @@ module execute_stage #(
     // mstatus.MIE / mip / mie): MSIP and/or MTIP. Read to decide
     // take_interrupt and to wake WFI halt.
     input wire            int_pending_i,
+    // Interrupt pending and locally enabled, ignoring mstatus.MIE: the WFI
+    // wake condition (trap_unit). A superset of int_pending_i.
+    input wire            wfi_wake_i,
     // The trap unit's resolved interrupt cause (MSI > MTI priority), used
     // as the mcause when an interrupt is taken.
     input wire [XLEN-1:0] int_cause_i,
@@ -719,7 +722,7 @@ module execute_stage #(
     // redirect in branch_valid_o / branch_addr_o below.
     logic wfi_halt_q;
     logic [XLEN-1:0] wfi_next_pc_q;
-    wire wfi_stall = wfi_halt_q & ~int_pending_i;
+    wire wfi_stall = wfi_halt_q & ~wfi_wake_i;
     wire freeze = stall_i | wfi_stall;
 
     // Sync trap request: a decode exception (illegal/ecall/ebreak) fires in
@@ -1420,7 +1423,14 @@ module execute_stage #(
     // freezing the pipe inside the handler with no way to retire the CSR write
     // that would re-enable interrupts -- an unrecoverable deadlock. Clearing
     // on int_pending_i releases the halt whichever event actually wins.
-    assign wfi_halt_d    = wfi_retire | (wfi_halt_q & ~int_pending_i);
+    //
+    // The clear is wfi_wake_i (mip & mie, NOT gated by mstatus.MIE), which
+    // contains int_pending_i, so the argument above still holds. A wake with
+    // MIE = 0 takes no interrupt: freeze drops and the instruction after the
+    // WFI simply executes (Linux's idle loop: wfi, then enable interrupts).
+    // In that wake cycle trap_mepc still selects wfi_next_pc_q, which is the
+    // pc of that very instruction, so a fault there records the right mepc.
+    assign wfi_halt_d    = wfi_retire | (wfi_halt_q & ~wfi_wake_i);
     assign wfi_next_pc_d = wfi_retire ? pc_link : wfi_next_pc_q;
 
     // =================================================================

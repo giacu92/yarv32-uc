@@ -240,26 +240,26 @@ module top_module (
     // -----------------------------------------------------------------
     // Fetch I-mem port is 64-bit read-only (ifetch); the LSU D-mem port stays
     // on the 32-bit byte-strobed mem_req_t / mem_rsp_t.
-    ifetch_req_t imem_req;
-    ifetch_rsp_t imem_rsp;
-    mem_req_t    dmem_req;
-    mem_rsp_t    dmem_rsp;
+    ifetch_req_t        imem_req;
+    ifetch_rsp_t        imem_rsp;
+    mem_req_t           dmem_req;
+    mem_rsp_t           dmem_rsp;
     // The read-only I-mem holds BVALID low (no write-ack); sink it so the
     // port is connected (a native_ram write-ack only exists for the D-mem).
-    wire         imem_bvalid_unused;
+    wire                imem_bvalid_unused;
 
     // Interrupt pending bits from the peri MMIO slaves.
-    wire         msip;
-    wire         mtip;
-    wire [63:0] mtime;
+    wire                msip;
+    wire                mtip;
+    wire         [63:0] mtime;
 
     // Machine external interrupt from the sifive PLIC's context 0; the S-mode
     // context (seip) has no consumer until S-mode exists (M11).
-    wire         uart_irq;
-    wire         spi_irq;
-    wire         gpio_irq;
-    wire         meip;
-    wire         seip_unused;
+    wire                uart_irq;
+    wire                spi_irq;
+    wire                gpio_irq;
+    wire                meip;
+    wire                seip_unused;
 
     // -----------------------------------------------------------------
     // CPU. Functional ports only — no debug crosses the CPU boundary
@@ -277,19 +277,22 @@ module top_module (
         .EXEC_REDIR_INCYCLE(rv32_pkg::EXEC_REDIR_INCYCLE),
         .LSU_LIVE_LOAD     (rv32_pkg::LSU_LIVE_LOAD)
     ) u_cpu (
-        .clk_i      (clk_core),
-        .rstn_i     (rstn_core),
-        .boot_addr_i(32'h0000_0000),
+        .clk_i       (clk_core),
+        .rstn_i      (rstn_core),
+        .boot_addr_i (32'h0000_0000),
         //.dbg_stall_o(dbg_stall),
-        .axi_peri   (axi_bus_peri.master),
-        .imem_req_o (imem_req),
-        .imem_rsp_i (imem_rsp),
-        .dmem_req_o (dmem_req),
-        .dmem_rsp_i (dmem_rsp),
-        .msip_i     (msip),
-        .mtip_i     (mtip),
-        .mtime_i    (mtime),
-        .meip_i     (meip)
+        .axi_peri    (axi_bus_peri.master),
+        .imem_req_o  (imem_req),
+        .imem_rsp_i  (imem_rsp),
+        .dmem_req_o  (dmem_req),
+        .dmem_rsp_i  (dmem_rsp),
+        .msip_i      (msip),
+        .mtip_i      (mtip),
+        .mtime_i     (mtime),
+        .meip_i      (meip),
+        // BSRAM memories are always coherent: fence.i is a flush + refetch.
+        .fencei_req_o(),
+        .fencei_ack_i(1'b1)
     );
 
     // -----------------------------------------------------------------
@@ -299,10 +302,10 @@ module top_module (
     // $readmemh in sim_top.
     // -----------------------------------------------------------------
     native_ram #(
-        .ADDR_W     (14),                                // 16 KiB (see note below)
-        .DATA_WIDTH (64),                                // one access -> two 32-bit words
+        .ADDR_W     (14),                                   // 16 KiB (see note below)
+        .DATA_WIDTH (64),                                   // one access -> two 32-bit words
         .READ_ONLY  (1),
-        .OUTSTANDING(2),                                 // 2 fetch reads in flight
+        .OUTSTANDING(2),                                    // 2 fetch reads in flight
         // A read-only I-mem with no init and no write port is a zero-ROM:
         // Gowin folds every read to constant 0, the fetch stream becomes
         // all-illegal, and the whole pipeline (regfile/csr/alu/execute)
@@ -343,10 +346,10 @@ module top_module (
     // power-up; .bss and the stack are zeroed by start.S / runtime use.
     // -----------------------------------------------------------------
     native_ram #(
-        .ADDR_W     (14),                                // 16 KiB (see note below)
+        .ADDR_W     (14),                                   // 16 KiB (see note below)
         .DATA_WIDTH (32),
         .READ_ONLY  (0),
-        .OUTSTANDING(1),                                 // LSU single-outstanding
+        .OUTSTANDING(1),                                    // LSU single-outstanding
         .INIT_FILE  ("sim/sw/guitar_tuner/build/dmem.hex")
     ) u_dmem (
         .clk_i       (clk_core),
@@ -433,104 +436,104 @@ module top_module (
         .m_rdata_i  (peri_rdata)
     );
 
-    assign axi_bus_uart.awaddr  = peri_awaddr;
-    assign axi_bus_uart.wdata   = peri_wdata;
-    assign axi_bus_uart.wstrb   = peri_wstrb;
-    assign axi_bus_uart.araddr  = peri_araddr;
-    assign axi_bus_uart.awvalid = peri_awvalid[W_UART];
-    assign axi_bus_uart.wvalid  = peri_wvalid[W_UART];
-    assign axi_bus_uart.bready  = peri_bready[W_UART];
-    assign axi_bus_uart.arvalid = peri_arvalid[W_UART];
-    assign axi_bus_uart.rready  = peri_rready[W_UART];
-    assign peri_awready[W_UART]  = axi_bus_uart.awready;
-    assign peri_wready[W_UART]   = axi_bus_uart.wready;
-    assign peri_bvalid[W_UART]   = axi_bus_uart.bvalid;
-    assign peri_arready[W_UART]  = axi_bus_uart.arready;
-    assign peri_rvalid[W_UART]   = axi_bus_uart.rvalid;
-    assign peri_bresp[2*W_UART+:2]   = axi_bus_uart.bresp;
-    assign peri_rresp[2*W_UART+:2]   = axi_bus_uart.rresp;
-    assign peri_rdata[32*W_UART+:32] = axi_bus_uart.rdata;
+    assign axi_bus_uart.awaddr        = peri_awaddr;
+    assign axi_bus_uart.wdata         = peri_wdata;
+    assign axi_bus_uart.wstrb         = peri_wstrb;
+    assign axi_bus_uart.araddr        = peri_araddr;
+    assign axi_bus_uart.awvalid       = peri_awvalid[W_UART];
+    assign axi_bus_uart.wvalid        = peri_wvalid[W_UART];
+    assign axi_bus_uart.bready        = peri_bready[W_UART];
+    assign axi_bus_uart.arvalid       = peri_arvalid[W_UART];
+    assign axi_bus_uart.rready        = peri_rready[W_UART];
+    assign peri_awready[W_UART]       = axi_bus_uart.awready;
+    assign peri_wready[W_UART]        = axi_bus_uart.wready;
+    assign peri_bvalid[W_UART]        = axi_bus_uart.bvalid;
+    assign peri_arready[W_UART]       = axi_bus_uart.arready;
+    assign peri_rvalid[W_UART]        = axi_bus_uart.rvalid;
+    assign peri_bresp[2*W_UART+:2]    = axi_bus_uart.bresp;
+    assign peri_rresp[2*W_UART+:2]    = axi_bus_uart.rresp;
+    assign peri_rdata[32*W_UART+:32]  = axi_bus_uart.rdata;
 
-    assign axi_bus_spi.awaddr  = peri_awaddr;
-    assign axi_bus_spi.wdata   = peri_wdata;
-    assign axi_bus_spi.wstrb   = peri_wstrb;
-    assign axi_bus_spi.araddr  = peri_araddr;
-    assign axi_bus_spi.awvalid = peri_awvalid[W_SPI];
-    assign axi_bus_spi.wvalid  = peri_wvalid[W_SPI];
-    assign axi_bus_spi.bready  = peri_bready[W_SPI];
-    assign axi_bus_spi.arvalid = peri_arvalid[W_SPI];
-    assign axi_bus_spi.rready  = peri_rready[W_SPI];
-    assign peri_awready[W_SPI]  = axi_bus_spi.awready;
-    assign peri_wready[W_SPI]   = axi_bus_spi.wready;
-    assign peri_bvalid[W_SPI]   = axi_bus_spi.bvalid;
-    assign peri_arready[W_SPI]  = axi_bus_spi.arready;
-    assign peri_rvalid[W_SPI]   = axi_bus_spi.rvalid;
-    assign peri_bresp[2*W_SPI+:2]   = axi_bus_spi.bresp;
-    assign peri_rresp[2*W_SPI+:2]   = axi_bus_spi.rresp;
-    assign peri_rdata[32*W_SPI+:32] = axi_bus_spi.rdata;
+    assign axi_bus_spi.awaddr         = peri_awaddr;
+    assign axi_bus_spi.wdata          = peri_wdata;
+    assign axi_bus_spi.wstrb          = peri_wstrb;
+    assign axi_bus_spi.araddr         = peri_araddr;
+    assign axi_bus_spi.awvalid        = peri_awvalid[W_SPI];
+    assign axi_bus_spi.wvalid         = peri_wvalid[W_SPI];
+    assign axi_bus_spi.bready         = peri_bready[W_SPI];
+    assign axi_bus_spi.arvalid        = peri_arvalid[W_SPI];
+    assign axi_bus_spi.rready         = peri_rready[W_SPI];
+    assign peri_awready[W_SPI]        = axi_bus_spi.awready;
+    assign peri_wready[W_SPI]         = axi_bus_spi.wready;
+    assign peri_bvalid[W_SPI]         = axi_bus_spi.bvalid;
+    assign peri_arready[W_SPI]        = axi_bus_spi.arready;
+    assign peri_rvalid[W_SPI]         = axi_bus_spi.rvalid;
+    assign peri_bresp[2*W_SPI+:2]     = axi_bus_spi.bresp;
+    assign peri_rresp[2*W_SPI+:2]     = axi_bus_spi.rresp;
+    assign peri_rdata[32*W_SPI+:32]   = axi_bus_spi.rdata;
 
-    assign axi_bus_gpio.awaddr  = peri_awaddr;
-    assign axi_bus_gpio.wdata   = peri_wdata;
-    assign axi_bus_gpio.wstrb   = peri_wstrb;
-    assign axi_bus_gpio.araddr  = peri_araddr;
-    assign axi_bus_gpio.awvalid = peri_awvalid[W_GPIO];
-    assign axi_bus_gpio.wvalid  = peri_wvalid[W_GPIO];
-    assign axi_bus_gpio.bready  = peri_bready[W_GPIO];
-    assign axi_bus_gpio.arvalid = peri_arvalid[W_GPIO];
-    assign axi_bus_gpio.rready  = peri_rready[W_GPIO];
-    assign peri_awready[W_GPIO]  = axi_bus_gpio.awready;
-    assign peri_wready[W_GPIO]   = axi_bus_gpio.wready;
-    assign peri_bvalid[W_GPIO]   = axi_bus_gpio.bvalid;
-    assign peri_arready[W_GPIO]  = axi_bus_gpio.arready;
-    assign peri_rvalid[W_GPIO]   = axi_bus_gpio.rvalid;
-    assign peri_bresp[2*W_GPIO+:2]   = axi_bus_gpio.bresp;
-    assign peri_rresp[2*W_GPIO+:2]   = axi_bus_gpio.rresp;
-    assign peri_rdata[32*W_GPIO+:32] = axi_bus_gpio.rdata;
+    assign axi_bus_gpio.awaddr        = peri_awaddr;
+    assign axi_bus_gpio.wdata         = peri_wdata;
+    assign axi_bus_gpio.wstrb         = peri_wstrb;
+    assign axi_bus_gpio.araddr        = peri_araddr;
+    assign axi_bus_gpio.awvalid       = peri_awvalid[W_GPIO];
+    assign axi_bus_gpio.wvalid        = peri_wvalid[W_GPIO];
+    assign axi_bus_gpio.bready        = peri_bready[W_GPIO];
+    assign axi_bus_gpio.arvalid       = peri_arvalid[W_GPIO];
+    assign axi_bus_gpio.rready        = peri_rready[W_GPIO];
+    assign peri_awready[W_GPIO]       = axi_bus_gpio.awready;
+    assign peri_wready[W_GPIO]        = axi_bus_gpio.wready;
+    assign peri_bvalid[W_GPIO]        = axi_bus_gpio.bvalid;
+    assign peri_arready[W_GPIO]       = axi_bus_gpio.arready;
+    assign peri_rvalid[W_GPIO]        = axi_bus_gpio.rvalid;
+    assign peri_bresp[2*W_GPIO+:2]    = axi_bus_gpio.bresp;
+    assign peri_rresp[2*W_GPIO+:2]    = axi_bus_gpio.rresp;
+    assign peri_rdata[32*W_GPIO+:32]  = axi_bus_gpio.rdata;
 
-    assign axi_bus_clint.awaddr  = peri_awaddr;
-    assign axi_bus_clint.wdata   = peri_wdata;
-    assign axi_bus_clint.wstrb   = peri_wstrb;
-    assign axi_bus_clint.araddr  = peri_araddr;
-    assign axi_bus_clint.awvalid = peri_awvalid[W_CLINT];
-    assign axi_bus_clint.wvalid  = peri_wvalid[W_CLINT];
-    assign axi_bus_clint.bready  = peri_bready[W_CLINT];
-    assign axi_bus_clint.arvalid = peri_arvalid[W_CLINT];
-    assign axi_bus_clint.rready  = peri_rready[W_CLINT];
-    assign peri_awready[W_CLINT]  = axi_bus_clint.awready;
-    assign peri_wready[W_CLINT]   = axi_bus_clint.wready;
-    assign peri_bvalid[W_CLINT]   = axi_bus_clint.bvalid;
-    assign peri_arready[W_CLINT]  = axi_bus_clint.arready;
-    assign peri_rvalid[W_CLINT]   = axi_bus_clint.rvalid;
+    assign axi_bus_clint.awaddr       = peri_awaddr;
+    assign axi_bus_clint.wdata        = peri_wdata;
+    assign axi_bus_clint.wstrb        = peri_wstrb;
+    assign axi_bus_clint.araddr       = peri_araddr;
+    assign axi_bus_clint.awvalid      = peri_awvalid[W_CLINT];
+    assign axi_bus_clint.wvalid       = peri_wvalid[W_CLINT];
+    assign axi_bus_clint.bready       = peri_bready[W_CLINT];
+    assign axi_bus_clint.arvalid      = peri_arvalid[W_CLINT];
+    assign axi_bus_clint.rready       = peri_rready[W_CLINT];
+    assign peri_awready[W_CLINT]      = axi_bus_clint.awready;
+    assign peri_wready[W_CLINT]       = axi_bus_clint.wready;
+    assign peri_bvalid[W_CLINT]       = axi_bus_clint.bvalid;
+    assign peri_arready[W_CLINT]      = axi_bus_clint.arready;
+    assign peri_rvalid[W_CLINT]       = axi_bus_clint.rvalid;
     assign peri_bresp[2*W_CLINT+:2]   = axi_bus_clint.bresp;
     assign peri_rresp[2*W_CLINT+:2]   = axi_bus_clint.rresp;
     assign peri_rdata[32*W_CLINT+:32] = axi_bus_clint.rdata;
 
-    assign axi_bus_plic.awaddr  = peri_awaddr;
-    assign axi_bus_plic.wdata   = peri_wdata;
-    assign axi_bus_plic.wstrb   = peri_wstrb;
-    assign axi_bus_plic.araddr  = peri_araddr;
-    assign axi_bus_plic.awvalid = peri_awvalid[W_PLIC];
-    assign axi_bus_plic.wvalid  = peri_wvalid[W_PLIC];
-    assign axi_bus_plic.bready  = peri_bready[W_PLIC];
-    assign axi_bus_plic.arvalid = peri_arvalid[W_PLIC];
-    assign axi_bus_plic.rready  = peri_rready[W_PLIC];
-    assign peri_awready[W_PLIC]  = axi_bus_plic.awready;
-    assign peri_wready[W_PLIC]   = axi_bus_plic.wready;
-    assign peri_bvalid[W_PLIC]   = axi_bus_plic.bvalid;
-    assign peri_arready[W_PLIC]  = axi_bus_plic.arready;
-    assign peri_rvalid[W_PLIC]   = axi_bus_plic.rvalid;
-    assign peri_bresp[2*W_PLIC+:2]   = axi_bus_plic.bresp;
-    assign peri_rresp[2*W_PLIC+:2]   = axi_bus_plic.rresp;
-    assign peri_rdata[32*W_PLIC+:32] = axi_bus_plic.rdata;
+    assign axi_bus_plic.awaddr        = peri_awaddr;
+    assign axi_bus_plic.wdata         = peri_wdata;
+    assign axi_bus_plic.wstrb         = peri_wstrb;
+    assign axi_bus_plic.araddr        = peri_araddr;
+    assign axi_bus_plic.awvalid       = peri_awvalid[W_PLIC];
+    assign axi_bus_plic.wvalid        = peri_wvalid[W_PLIC];
+    assign axi_bus_plic.bready        = peri_bready[W_PLIC];
+    assign axi_bus_plic.arvalid       = peri_arvalid[W_PLIC];
+    assign axi_bus_plic.rready        = peri_rready[W_PLIC];
+    assign peri_awready[W_PLIC]       = axi_bus_plic.awready;
+    assign peri_wready[W_PLIC]        = axi_bus_plic.wready;
+    assign peri_bvalid[W_PLIC]        = axi_bus_plic.bvalid;
+    assign peri_arready[W_PLIC]       = axi_bus_plic.arready;
+    assign peri_rvalid[W_PLIC]        = axi_bus_plic.rvalid;
+    assign peri_bresp[2*W_PLIC+:2]    = axi_bus_plic.bresp;
+    assign peri_rresp[2*W_PLIC+:2]    = axi_bus_plic.rresp;
+    assign peri_rdata[32*W_PLIC+:32]  = axi_bus_plic.rdata;
 
     // -----------------------------------------------------------------
     // Main-only peripherals' pads (I2C, I2S): released, inputs unused. The
     // ports stay so the board .cst needs no edit between branches.
     // -----------------------------------------------------------------
-    assign i2c_scl_io  = 1'bz;
-    assign i2c_sda_io  = 1'bz;
-    assign i2s_bclk_io = 1'bz;
-    assign i2s_lrck_io = 1'bz;
+    assign i2c_scl_io                 = 1'bz;
+    assign i2c_sda_io                 = 1'bz;
+    assign i2s_bclk_io                = 1'bz;
+    assign i2s_lrck_io                = 1'bz;
 
     // -----------------------------------------------------------------
     // SPI master (axi4_lite_spi). miso double-flopped (asynchronous pin).

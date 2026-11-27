@@ -151,6 +151,11 @@ module decode_stage #(
     input wire stall_i,
     input wire flush_i,
 
+    // Current privilege, 1 = M, 0 = U (a flop in csr_regfile). Changes only
+    // on trap entry / mret, both of which redirect and flush decode, so the
+    // value seen here always belongs to the instruction being decoded.
+    input wire priv_m_i,
+
     // Execute writeback observation for the forward path: when execute
     // retires a register write this cycle (ex_wb_en_i) to a destination
     // (ex_wb_addr_i, ex_wb_data_i) that the instruction being decoded
@@ -668,8 +673,8 @@ module decode_stage #(
                 CSR_ADDR_MEPC, CSR_ADDR_MCAUSE, CSR_ADDR_MTVAL, CSR_ADDR_MIP, CSR_ADDR_MCYCLE,
                 CSR_ADDR_MINSTRET, CSR_ADDR_MCYCLEH, CSR_ADDR_MINSTRETH, CSR_ADDR_CYCLE,
                 CSR_ADDR_TIME, CSR_ADDR_INSTRET, CSR_ADDR_CYCLEH, CSR_ADDR_TIMEH, CSR_ADDR_INSTRETH,
-                12'h310, 12'hF11, 12'hF12, 12'hF13, 12'hF14, 12'hF15, 12'h7A0, 12'h7A1, 12'h7A2,
-                12'h7A3:
+                12'h306, 12'h310, 12'hF11, 12'hF12, 12'hF13, 12'hF14, 12'hF15, 12'h7A0, 12'h7A1,
+                12'h7A2, 12'h7A3:
             return 1'b1;
             default: return 1'b0;
         endcase
@@ -1311,10 +1316,14 @@ module decode_stage #(
                     // instruction word only (funct12, funct3, rs1 field), so
                     // it is a flop-to-flop term into de_d.illegal / exception,
                     // never on the operand or forwarding path.
+                    // U-mode (linux-soc): every CSR is illegal. All the
+                    // M CSRs need M (csr[9:8] = 11), and mcounteren is
+                    // read-only zero, so cycle/time/instret are not
+                    // delegated to U either.
                     if (!csr_addr_known(
                             funct12
                         ) || (funct12[11:10] == 2'b11 &&
-                              (funct3[1:0] == 2'b01 || rs1_field != 5'd0)))
+                              (funct3[1:0] == 2'b01 || rs1_field != 5'd0)) || !priv_m_i)
                         dec_illegal = 1'b1;
                 end else begin
                     // Trap-entry / return / halt ops (funct3 == 0). Retire
@@ -1323,11 +1332,11 @@ module decode_stage #(
                     // ebreak raise a sync trap (exc_req=1) the cycle they
                     // retire; mret/wfi are legal no-side-eff at decode.
                     // SFENCE.VMA (no VM) stays illegal -> traps as illegal.
-                    if (funct12 == 12'h000) begin  // ECALL -> env call from M-mode
+                    if (funct12 == 12'h000) begin  // ECALL -> env call from M or U
                         sys_op      = SYS_ECALL;
                         dec_illegal = 1'b0;
                         exc_req     = 1'b1;
-                        exc_cause   = MCAUSE_ECALL_M;
+                        exc_cause   = priv_m_i ? MCAUSE_ECALL_M : MCAUSE_ECALL_U;
                         exc_tval    = '0;
                     end else if (funct12 == 12'h001) begin  // EBREAK -> breakpoint
                         sys_op      = SYS_EBREAK;
@@ -1337,12 +1346,15 @@ module decode_stage #(
                         exc_tval    = '0;
                     end else if (funct7 == 7'b0001000 && rs2_field == 5'b00101 &&
                                  rs1_field == 5'b00000) begin  // WFI
-                        sys_op      = SYS_WFI;
-                        dec_illegal = 1'b0;
+                        // In U-mode WFI is illegal: with no S-mode the spec
+                        // only allows it in U if it completes in bounded
+                        // time, and here it halts until an interrupt.
+                        sys_op      = priv_m_i ? SYS_WFI : SYS_NONE;
+                        dec_illegal = !priv_m_i;
                     end else if (funct7 == 7'b0011000 && rs2_field == 5'b00010 &&
                                  rs1_field == 5'b00000) begin  // MRET
-                        sys_op      = SYS_MRET;
-                        dec_illegal = 1'b0;
+                        sys_op      = priv_m_i ? SYS_MRET : SYS_NONE;
+                        dec_illegal = !priv_m_i;  // mret needs M
                     end else if (funct7 == 7'b0001001) begin  // SFENCE.VMA -> illegal (no VM)
                         dec_illegal = 1'b1;
                     end else begin

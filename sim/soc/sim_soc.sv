@@ -32,8 +32,8 @@ import rv32_pkg::*;
  */
 module sim_top #(
     // Linux SoC (M5): reset vector = bootrom, SDRAM power-up wait.
-    parameter logic [31:0] BOOT_ADDR = 32'h0080_0000,
-    parameter int SDRAM_INIT_US = 200,
+    parameter logic        [31:0] BOOT_ADDR          = 32'h0080_0000,
+    parameter int                 SDRAM_INIT_US      = 200,
     // UART clock/baud, overridable from the Verilator command line
     // (-GUART_CLK_HZ=... -GUART_BAUD=...). Deliberately NOT taken from
     // rv32_pkg, unlike the four structural knobs below: the package carries
@@ -42,32 +42,32 @@ module sim_top #(
     // (5 clocks per bit); pass the board's real numbers
     // (25_000_000 / 115_200 -> 217 clocks per bit) to check the RX
     // sampling phase at the divisor the hardware actually uses.
-    parameter int unsigned UART_CLK_HZ        = 50_000_000,
+    parameter int unsigned        UART_CLK_HZ        = 50_000_000,
     // 16550 semantics (axi4_lite_uart16550): one bit = 16 x DL clocks, so
     // the fastest the sim can run is DL = 1 = 16 clocks per bit, i.e.
     // 50 MHz / 16 = 3.125 MBaud. sim_main.cpp's UART_BIT_CYCLES default
     // matches (16).
-    parameter int unsigned UART_BAUD          = 3_125_000,
+    parameter int unsigned        UART_BAUD          = 3_125_000,
     // Branch-predictor enable A/B knob: -GBP_EN=0 disables prediction and
     // reproduces the pre-predictor core exactly (the baseline). Default 1.
-    parameter int          BP_EN              = rv32_pkg::BP_EN,
+    parameter int                 BP_EN              = rv32_pkg::BP_EN,
     // MUL structure A/B knob: -GMUL_SHARED_DSP=0 restores the three-product
     // form (see alu.sv). Functionally identical, so this is a timing knob
     // only -- the retire stream must not move.
-    parameter int          MUL_SHARED_DSP     = rv32_pkg::MUL_SHARED_DSP,
+    parameter int                 MUL_SHARED_DSP     = rv32_pkg::MUL_SHARED_DSP,
     // PHT lookup placement A/B knob: -GBP_PUSH_LOOKUP=0 reads the PHT at
     // decode with the live GHR (the original form); 1 reads it at
     // instruction-buffer push time and carries the bit in the entry. Unlike
     // MUL_SHARED_DSP this one DOES move the retire stream -- the push-time
     // read sees a slightly older GHR, so predictions differ.
-    parameter int          BP_PUSH_LOOKUP     = rv32_pkg::BP_PUSH_LOOKUP,
+    parameter int                 BP_PUSH_LOOKUP     = rv32_pkg::BP_PUSH_LOOKUP,
     // -GEXEC_REDIR_INCYCLE=1 restores the 2026-08-31 form where an execute
     // redirect also launches its read in the redirect cycle. Default 0 keeps
     // the register file off the I-mem address pins (see fetch_stage.sv) and
     // costs 1 cycle per mispredict / trap / mret.
-    parameter int          EXEC_REDIR_INCYCLE = rv32_pkg::EXEC_REDIR_INCYCLE,
+    parameter int                 EXEC_REDIR_INCYCLE = rv32_pkg::EXEC_REDIR_INCYCLE,
     // -GLSU_LIVE_LOAD=0 captures every bus op (the pre-2026-09-01 LSU).
-    parameter int          LSU_LIVE_LOAD      = rv32_pkg::LSU_LIVE_LOAD
+    parameter int                 LSU_LIVE_LOAD      = rv32_pkg::LSU_LIVE_LOAD
 ) (
     input  wire       clk_i,
     input  wire       rstn_i,
@@ -112,49 +112,55 @@ module sim_top #(
     // (cached), 0x80_0000 2 KiB bootrom, 0x80_1000 cache control register.
     // Peripherals stay on addr[28] and never reach the cache.
     // -----------------------------------------------------------------
-    ifetch_req_t imem_req;
-    ifetch_rsp_t imem_rsp;
-    mem_req_t    dmem_req;
-    mem_rsp_t    dmem_rsp;
+    ifetch_req_t        imem_req;
+    ifetch_rsp_t        imem_rsp;
+    mem_req_t           dmem_req;
+    mem_rsp_t           dmem_rsp;
 
     // Interrupt pending bits (mip.MSIP / mip.MTIP sources).
-    wire        msip;
-    wire        mtip;
-    wire [63:0] mtime;
+    wire                msip;
+    wire                mtip;
+    wire         [63:0] mtime;
     // Machine external interrupt: the PLIC aggregates the peripheral
     // level IRQs (UART / I2C / SPI / GPIO), same as the board top. The
     // source IRQs reset deasserted, so they never raise meip unless a
     // test enables them through MMIO.
-    wire        uart_irq;
-    wire        spi_irq;
-    wire        gpio_irq;
-    wire        meip;
+    wire                uart_irq;
+    wire                spi_irq;
+    wire                gpio_irq;
+    wire                meip;
 
     // -----------------------------------------------------------------
     // CPU. Boots from the bootrom. IMEM_ADDR_W = 32: no fetch fault at all,
     // because the cache decodes only bits [23:0] and 0x8000_0000 -- the
     // standard RV32 nommu kernel load address -- must alias SDRAM 0.
     // -----------------------------------------------------------------
+    // fence.i: CPU holds the level request, the cache writes back dirty
+    // D-lines, invalidates the I-cache and pulses the ack.
+    wire fencei_req, fencei_ack;
+
     rv32imac_zicsr_zifencei #(
-        .IMEM_ADDR_W       (32),  // no fetch fault: 0x8000_0000 aliases SDRAM (Linux load address)
-        .BP_EN             (BP_EN),
-        .MUL_SHARED_DSP    (MUL_SHARED_DSP),
-        .BP_PUSH_LOOKUP    (BP_PUSH_LOOKUP),
+        .IMEM_ADDR_W(32),  // no fetch fault: 0x8000_0000 aliases SDRAM (Linux load address)
+        .BP_EN(BP_EN),
+        .MUL_SHARED_DSP(MUL_SHARED_DSP),
+        .BP_PUSH_LOOKUP(BP_PUSH_LOOKUP),
         .EXEC_REDIR_INCYCLE(EXEC_REDIR_INCYCLE),
-        .LSU_LIVE_LOAD     (LSU_LIVE_LOAD)
+        .LSU_LIVE_LOAD(LSU_LIVE_LOAD)
     ) u_cpu (
-        .clk_i      (clk_i),
-        .rstn_i     (rstn_i),
-        .boot_addr_i(BOOT_ADDR),
-        .axi_peri   (axi_bus_peri.master),
-        .imem_req_o (imem_req),
-        .imem_rsp_i (imem_rsp),
-        .dmem_req_o (dmem_req),
-        .dmem_rsp_i (dmem_rsp),
-        .msip_i     (msip),
-        .mtip_i     (mtip),
-        .mtime_i    (mtime),
-        .meip_i     (meip)
+        .clk_i       (clk_i),
+        .rstn_i      (rstn_i),
+        .boot_addr_i (BOOT_ADDR),
+        .axi_peri    (axi_bus_peri.master),
+        .imem_req_o  (imem_req),
+        .imem_rsp_i  (imem_rsp),
+        .dmem_req_o  (dmem_req),
+        .dmem_rsp_i  (dmem_rsp),
+        .msip_i      (msip),
+        .mtip_i      (mtip),
+        .mtime_i     (mtime),
+        .meip_i      (meip),
+        .fencei_req_o(fencei_req),
+        .fencei_ack_i(fencei_ack)
     );
 
     yarv32_cache_pkg::mem_req_t ic_req, dc_req;
@@ -201,7 +207,7 @@ module sim_top #(
         dc_req.rready = dc_rready;
     end
 
-    wire        sd_clk, sd_cke, sd_cs_n, sd_ras_n, sd_cas_n, sd_we_n;
+    wire sd_clk, sd_cke, sd_cs_n, sd_ras_n, sd_cas_n, sd_we_n;
     wire [ 3:0] sd_dqm;
     wire [10:0] sd_addr;
     wire [ 1:0] sd_ba;
@@ -219,6 +225,8 @@ module sim_top #(
         .icache_rsp_o (ic_rsp),
         .dcache_req_i (dc_req),
         .dcache_rsp_o (dc_rsp),
+        .fencei_req_i (fencei_req),
+        .fencei_ack_o (fencei_ack),
         .sdram_clk_o  (sd_clk),
         .sdram_cke_o  (sd_cke),
         .sdram_cs_n_o (sd_cs_n),
@@ -262,12 +270,14 @@ module sim_top #(
     // model's own initial fill would otherwise race this one, and this build
     // (--cc, no --timing) has no #delay to order them.
     string sinit_file, binit_file;
-    logic  preloaded = 1'b0;
+    logic preloaded = 1'b0;
     always @(posedge clk_i) begin
         if (!preloaded) begin
             if ($value$plusargs("SINIT=%s", sinit_file)) begin
                 $readmemh(sinit_file, u_sdram.mem);
-                $readmemh(sinit_file, probe_shadow);
+                // +NOPROBE: an image larger than the 16 KiB shadow (a kernel)
+                // would abort $readmemh; PROBE is meaningless for it anyway.
+                if (!$test$plusargs("NOPROBE")) $readmemh(sinit_file, probe_shadow);
             end
             if ($value$plusargs("BINIT=%s", binit_file))
                 $readmemh(binit_file, u_cache.u_bootrom.mem);
@@ -284,9 +294,16 @@ module sim_top #(
             if (imem_rsp.rvalid && imem_req.rready)
                 $display("%0t I-rsp  %016x", $time, imem_rsp.rdata);
             if (dmem_req.wvalid && dmem_rsp.wready)
-                $display("%0t D-acc  %08x we=%0d wd=%08x st=%x", $time, dmem_req.addr, dmem_req.we,
-                         dmem_req.wdata, dmem_req.wstrb);
-            if (dmem_rsp.rvalid && dmem_req.rready) $display("%0t D-rsp  %08x", $time, dmem_rsp.rdata);
+                $display(
+                    "%0t D-acc  %08x we=%0d wd=%08x st=%x",
+                    $time,
+                    dmem_req.addr,
+                    dmem_req.we,
+                    dmem_req.wdata,
+                    dmem_req.wstrb
+                );
+            if (dmem_rsp.rvalid && dmem_req.rready)
+                $display("%0t D-rsp  %08x", $time, dmem_rsp.rdata);
         end
     end
 
@@ -297,11 +314,11 @@ module sim_top #(
     // Initialised from the same image as the SDRAM (preload block above).
     // -----------------------------------------------------------------
     always_ff @(posedge clk_i) begin
-        if (dmem_req.wvalid && dmem_rsp.wready && dmem_req.we &&
-            !dmem_req.addr[PERI_ADDR_BIT] && (dmem_req.addr[31:14] == '0)) begin
+        if (dmem_req.wvalid && dmem_rsp.wready && dmem_req.we && !dmem_req.addr[PERI_ADDR_BIT] &&
+            (dmem_req.addr[31:14] == '0)) begin
             for (int b = 0; b < 4; b++)
-                if (dmem_req.wstrb[b])
-                    probe_shadow[dmem_req.addr[13:2]][8*b+:8] <= dmem_req.wdata[8*b+:8];
+            if (dmem_req.wstrb[b])
+                probe_shadow[dmem_req.addr[13:2]][8*b+:8] <= dmem_req.wdata[8*b+:8];
         end
     end
 
@@ -405,7 +422,7 @@ module sim_top #(
     wire spi_sck, spi_mosi, spi_cs_n, spi_miso, flash_miso;
     // +SPIFLASH: MISO comes from a serial NOR flash model (M9 boot path,
     // preloaded with +FINIT=<hex>); otherwise the loopback spi_loop expects.
-    bit  spi_flash_en;
+    bit spi_flash_en;
     initial spi_flash_en = $test$plusargs("SPIFLASH");
     assign spi_miso = spi_flash_en ? flash_miso : spi_mosi;
     spi_flash_model u_flash (

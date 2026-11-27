@@ -113,6 +113,7 @@ REGRESS_TESTS := \
 	bp_pred:isa/bp_pred/build:20000:probe@0x2000=600d \
 	mul_ops:isa/mul_ops/build:20000:probe@0x2000=600d \
 	csr_ops:isa/csr_ops/build:20000:probe@0x2000=600d \
+	umode_ops:isa/umode_ops/build:20000:probe@0x2000=600d \
 	amo_ops:isa/amo_ops/build:20000:probe@0x2000=600d \
 	amo_stress:amo_stress/build:400000:trace:x10=600d \
 	fencei_ops:isa/fencei_ops/build:20000:probe@0x2000=600d \

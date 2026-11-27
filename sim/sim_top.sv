@@ -153,18 +153,21 @@ module sim_top #(
         .EXEC_REDIR_INCYCLE(EXEC_REDIR_INCYCLE),
         .LSU_LIVE_LOAD     (LSU_LIVE_LOAD)
     ) u_cpu (
-        .clk_i      (clk_i),
-        .rstn_i     (rstn_i),
-        .boot_addr_i(32'h0000_0000),
-        .axi_peri   (axi_bus_peri.master),
-        .imem_req_o (imem_req),
-        .imem_rsp_i (imem_rsp),
-        .dmem_req_o (dmem_req),
-        .dmem_rsp_i (dmem_rsp),
-        .msip_i     (msip),
-        .mtip_i     (mtip),
-        .mtime_i    (mtime),
-        .meip_i     (meip)
+        .clk_i       (clk_i),
+        .rstn_i      (rstn_i),
+        .boot_addr_i (32'h0000_0000),
+        .axi_peri    (axi_bus_peri.master),
+        .imem_req_o  (imem_req),
+        .imem_rsp_i  (imem_rsp),
+        .dmem_req_o  (dmem_req),
+        .dmem_rsp_i  (dmem_rsp),
+        .msip_i      (msip),
+        .mtip_i      (mtip),
+        .mtime_i     (mtime),
+        .meip_i      (meip),
+        // BSRAM memories are always coherent: fence.i is a flush + refetch.
+        .fencei_req_o(),
+        .fencei_ack_i(1'b1)
     );
 
     // -----------------------------------------------------------------

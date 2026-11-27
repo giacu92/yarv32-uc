@@ -510,3 +510,96 @@ merged (`3afeeda`) and can be left alone.
 Working rules: unattended, log decisions as D22 onward, few large commits, the
 toolchain is in CLAUDE.md / memory, and the owner reports the session-limit
 percentage (stop before 95%).
+
+## Session 3 (2026-11-27, unattended, after the RESUME HERE handoff)
+
+Two fresh workers: A in the cache submodule (M6, M7 cache side, M4b), C in
+`~/yarv-linux` (M10 on QEMU). Main thread: integration, the SoC Linux boot,
+and the core fixes that boot exposed.
+
+### M6 — SDRAM burst reads (cache repo `m6-burst` `d45ad0d`, controller `e190d36`)
+- **Clean miss at 50 MHz: 78 / 82 / 90 -> 15 / 15 / 20 core cycles** (min /
+  avg / max, `make bist`). Target (≤ 20) met; the max of 20 is a refresh
+  falling due as the request arrives.
+- Where the 78 went: 72 were the controller doing eight single-word
+  transactions of 9 cycles each; 6 were the cache FSM. No CDC cost (one clock).
+- The 15 left: 1 arbitrate, 1 ACT, 1 READ (tRCD = 1 clock at 50 MHz), 3 CAS
+  (CL plus the controller's input register), 8 data words, 1 unstall. Further
+  cuts need early restart at the requested word, CL=2 (unchecked on the
+  GW2AR die) or issuing from S_IDLE.
+- The SDRAM model now checks tRAS, tRC, auto-precharge + tRP, tREFI and
+  commands issued during a burst (it did not before); controller mutants
+  breaking tRCD, write recovery, tRAS, refresh period and CL are each caught.
+- **CoreMark on the SoC barely moved: 617 529 -> 610 201 cyc/iter (1.61 ->
+  1.63 CM/MHz), CRCs correct.** load-wait stays 0.353 CPI and imem-starve
+  0.243: CoreMark's working set fits the caches, so its cost is the cache
+  HIT path, not the miss. That is the next performance lever, not bursts.
+
+### M7 — fence.i (cache `2d8265b`, wired in this commit)
+- `fencei_req_i` level / `fencei_ack_o` one-cycle pulse; the flush drains
+  in-flight requests, writes back every dirty D line (lines stay valid,
+  clean), invalidates every I line. 2 cycles per set + ~20 per dirty line.
+- The CPU top gained `fencei_req_o` / `fencei_ack_i`; the BSRAM tops tie the
+  ack to 1 (BSRAM is coherent), `sim_soc.sv` wires the cache.
+- **SoC riscv-tests**: new `sim/soc/compliance.py` (`make compliance` in
+  `sim/soc`), own expected-failure list. **75 pass, 2 expected failures**
+  (`rv32ui-ma_data`, `rv32mi-pmpaddr`); `rv32ui-fence_i` and `rv32uc-rvc`
+  pass on the SoC (one coherent space with a real fence.i).
+
+### M4b — cache cells (cache `d26e8df`)
+- Measurement reconciled: the old 7 769 and the later 2 996 / 3 090 were the
+  same flow on `fpga_top`, which under-counts the cache by ~40% (the
+  self-test prunes address decode, fence.i was tied off). New `make cells`
+  synthesises a SoC-shaped wrapper. The default yosys count swings by
+  thousands on small edits (wide-LUT packing); `-nowidelut` is stable.
+- **2d8265b -> d26e8df: 3 221 -> 2 115 cells (-nowidelut), 5 789 -> 3 029
+  (default), FF 949 -> 777, BSRAM 12.** Cuts: no line buffer (writeback
+  streams from the victim way), explicit 2:1 lookup mux, one address/wdata per
+  cache. Latency unchanged (15/15/20).
+- Not pushed (NG-3).
+
+### M10 — QEMU (worker C, `~/yarv-linux/NOTES.md` §3)
+- **Shell in 8 MiB.** Image 1.75 MiB (was 3.5 MB), initramfs 224 KB, static
+  FLAT busybox 199 KB, MemFree 5 340 kB at the prompt.
+- **≈ 12.3 M instructions from reset to the prompt** (10.9 M kernel, 1.4 M
+  shell start).
+- SoC files: `~/yarv-linux/soc/Image` (load and entry 0x8000_0000, a0 = 0,
+  built-in DTB `yarv-soc.dts`, cmdline `earlycon console=ttyS0,115200
+  rdinit=/bin/sh`). DT checked against the RTL: CLINT, PLIC (`ndev = 15`,
+  UART = source 1), 16550 (reg-shift 2, 50 MHz) all match.
+
+### M10 — on the SoC sim: two core bugs found, both fixed
+Boot stub `sim/soc/bootrom_linux.hex` (a0 = a1 = 0, jump to 0x8000_0000),
+`+NOPROBE` (the 16 KiB probe shadow cannot take a kernel image),
+`UART_RX_START=<cycles>` in `sim_main.cpp` (type into the shell only once it
+listens).
+1. **Boot 1** reached `Run /bin/sh as init process` (≈ 0.75 s of simulated
+   time), then `Oops - environment call from M-mode`. A nommu M-mode kernel
+   runs userspace in **U-mode** (`start_thread` clears MPP) and handles only
+   cause 8. QEMU has U, so it never showed there. **Fix: minimal U-mode**
+   (D24).
+2. **Boot 2** printed the start of the BusyBox banner and then idled forever
+   (IPC 0.083 for the rest of 160 M cycles). **Cause: WFI only woke on
+   `int_pending`, which includes `mstatus.MIE`.** Linux's idle loop executes
+   `wfi` with MIE = 0 and enables interrupts afterwards; the spec resumes WFI
+   on `mip & mie` alone. **Fix: `wfi_wake` = pending & locally enabled,
+   independent of MIE** (D25).
+3. Boot 3 (with both fixes) is the run this commit is waiting on.
+
+New oracle `sw/isa/umode_ops` (in both regress lists): MPP WARL, ecall from
+U = 8 with MPP = 00, CSR / mret / wfi illegal in U, M-to-M mret leaves
+MPP = U, M interrupts taken in U with MIE = 0, and a `wfi` with MIE = 0 that
+must resume. Mutation-checked: ecall cause, the U interrupt enable, the U CSR
+check and the WFI wake are each caught. `csr_ops` / `amo_ops` updated for
+the new `misa`.
+
+| # | Decision | Reasoning |
+|---|---|---|
+| D22 | fence.i is a level request / pulse acknowledge, flush drains first | The CPU's `EX_FENCEI` already holds a level; draining needs no precondition from the caller |
+| D23 | The SoC gets its own compliance runner and expected-failure list | Its memory is one coherent space: `fence_i` and `rvc` pass there and must not be reported as XPASS against the Harvard list |
+| D24 | Minimal **U-mode now** (M + U, no S, no delegation): privilege flop, MPP WARL {00, 11}, ecall cause 8, every CSR / mret / wfi illegal in U, M interrupts always enabled in U, `mcounteren` read-only zero, `misa` = 0x4010_2105 | M10 cannot pass without it, and this is the least of M11 that Linux nommu needs. S-mode, delegation and the S CSRs stay in M11 |
+| D25 | WFI resumes on `mip & mie`, independent of `mstatus.MIE` | Required by the privileged spec and by Linux's idle loop; the previous gate hung the kernel on its first idle |
+| D26 | The compliance env's trap vector accepts the U-mode ecall | Upstream runs `rv32u*` bodies in U; with U implemented ours now do too, so the report ecall is cause 8 |
+| D27 | The cache figure is the SoC-shaped wrapper counted with `-nowidelut` | The board top prunes the cache and the default count is unstable (worker A) |
+| D28 | Bursts stop at 15 cycles | The remainder is SDRAM protocol; the CoreMark measurement shows the hit path, not the miss, is now what costs |
+| D29 | Formatting applied to whole touched files | `top_module.sv` and `sim_top.sv` were already off-format on the branch; formatting only the edited lines is not possible with Verible |

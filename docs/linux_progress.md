@@ -386,3 +386,44 @@ submodule pin moves to its fix.
 |---|---|---|
 | D17 | The SoC regress skips `ifault` instead of changing the test | Its expectation (fault above 16 KiB) is a property of the MCU's I-mem. The SoC's 16 MiB boundary is checked by the fetch range logic it shares; a SoC-specific ifault test can come with M9 |
 | D18 | `wfi_trap` arms its timer relative to `mtime` on this branch | An absolute deadline is an assumption about boot time, not about the WFI logic under test |
+
+### M5 + M9 status at stop (2026-11-27, session at ~82%)
+
+- **Cache I-port ordering bug FIXED by worker A**: `ffa1ad8` on
+  `m4-resource` (skid slots are a free list, so the FSM picked the youngest
+  waiting miss; now an age bit picks the oldest). New cache `sim_top` phase O
+  (O1–O3); the pre-fix RTL fails O1 and O3. **Submodule pin moved to
+  `ffa1ad8`** (still local-only, NG-3). M4b steps A/B (`781c0b4`, `aa03132`)
+  are included in the pin; M4b's cell count after them was not reported before stop.
+- **SoC regress: 17 passed, 0 failed, 1 skipped (ifault)**, including
+  `amo_ops` and the new `yload_qs`. BSRAM regress 19/19.
+- **M9 loader (`sim/sw/bootrom/yload.S`, 424 of 2048 ROM bytes)**:
+  - Framed protocol: `YL`, load address, length, entry, payload, CRC-32.
+    `yframe.py` builds the frame.
+  - Stores go to SDRAM with `CACHE_BYPASS` set, then `fence.i` and a jump
+    to the entry point.
+  - Boot order: the SPI flash at **2 MiB** (D19), then the UART if the magic
+    is absent or the CRC fails.
+  - Sim: UART boot of quicksort PASS (1 876 137 cyc); flash boot of
+    quicksort PASS (`+SPIFLASH +FINIT`, new `sim/spi_flash_model.sv`, READ
+    0x03 + JEDEC 0x9F). Both reach `0x600D`.
+- Not done: CoreMark on the SoC after the fix (unified build ready in
+  `sw/coremark/build-soc-i10`, image `soc/img/coremark10.hex`); board pin
+  mapping of the configuration flash (NG-4); M6 (bursts, latency baseline
+  78/82/90 → target ≤ 20); M7 proper (cache clean+invalidate ack); M10.
+- Worker C had built the RV32 nommu 6.18 `Image` (3.5 MB) and was
+  rebuilding a trimmed one when stopped (`~/yarv-linux/`). Its QEMU boot
+  result is not in yet.
+
+| # | Decision | Reasoning |
+|---|---|---|
+| D19 | Flash image offset 2 MiB | The GW2AR-18 bitstream is ~0.9 MB (the `.fs` holds ~7.26 M bit characters). 1 MiB would be tight; 2 MiB leaves 6 MiB, enough for the 3.5 MB kernel |
+| D20 | The loader tries flash first, then UART | Unattended boot needs flash. UART remains the recovery path, so a bad flash image can never brick the board |
+
+**NG-4 (board):** the Tang Nano 20K configuration-flash pins
+(MSPI/SPI pins of the GW2AR-18C QFN88) must be mapped to the SoC SPI
+master in the board top's `.cst`, and "MSPI as GPIO" may need to be enabled in
+the Gowin device configuration. This is unverified; see the
+`ArthurHeymans/tang_20k_spi_flash` reference in the assessment. Then flash
+the frame at offset 0x200000, e.g. with `openFPGALoader --external-flash
+-o 0x200000 frame.bin` (frame from `sim/sw/bootrom/yframe.py`).

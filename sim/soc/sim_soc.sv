@@ -401,7 +401,18 @@ module sim_top #(
     assign peri_rresp[2+:2]     = axi_bus_spi.rresp;
     assign peri_rdata[32+:32]   = axi_bus_spi.rdata;
 
-    wire spi_sck, spi_mosi, spi_cs_n;
+    wire spi_sck, spi_mosi, spi_cs_n, spi_miso, flash_miso;
+    // +SPIFLASH: MISO comes from a serial NOR flash model (M9 boot path,
+    // preloaded with +FINIT=<hex>); otherwise the loopback spi_loop expects.
+    bit  spi_flash_en;
+    initial spi_flash_en = $test$plusargs("SPIFLASH");
+    assign spi_miso = spi_flash_en ? flash_miso : spi_mosi;
+    spi_flash_model u_flash (
+        .sck (spi_sck),
+        .cs_n(spi_cs_n),
+        .mosi(spi_mosi),
+        .miso(flash_miso)
+    );
 
     axi4_lite_spi u_spi (
         .clk_i     (clk_i),
@@ -409,7 +420,7 @@ module sim_top #(
         .axi       (axi_bus_spi.slave),
         .spi_sck_o (spi_sck),
         .spi_mosi_o(spi_mosi),
-        .spi_miso_i(spi_mosi),           // loopback
+        .spi_miso_i(spi_miso),           // loopback, or the flash model (+SPIFLASH)
         .spi_cs_n_o(spi_cs_n),
         .spi_irq_o (spi_irq)
     );

@@ -66,5 +66,26 @@ for name, d, maxc, check in tests:
         print(f'{name:15s} FAIL   {cyc} cyc -- {"; ".join(bad)}'); nfail += 1
     else:
         print(f'{name:15s} PASS   {cyc} cyc'); npass += 1
+# yload: boot the UART loader from the ROM and send quicksort over the 16550.
+# Checks the whole M9 path: framing, CRC, CACHE_BYPASS stores to SDRAM,
+# fence.i, jump to the entry point.
+rom = os.path.join(SIM, 'sw', 'bootrom', 'build', 'bootrom.hex')
+qs = os.path.join(HERE, 'img', 'quicksort.hex')
+if os.path.exists(rom) and os.path.exists(qs):
+    frame = subprocess.run(['python3', os.path.join(SIM, 'sw', 'bootrom', 'yframe.py'), qs,
+                            '--escape'], capture_output=True, text=True).stdout
+    tr = os.path.join(HERE, 'img', 'yload.trace')
+    env = dict(os.environ, NO_VCD='1', MAX_CYC='6000000', UART_RX=frame, RTL_TRACE=tr)
+    out = subprocess.run([BIN, f'+BINIT={rom}'], cwd=SIM, env=env, capture_output=True,
+                         text=True, errors='replace').stdout
+    tx = open(os.path.join(SIM, 'sim_uart_tx.txt'), errors='replace').read()
+    m = re.findall(r'^0x[0-9a-f]* x10 0x0*([0-9a-f]*)$', open(tr).read(), re.M)
+    ok = tx.startswith('YK') and m and m[-1] == '600d' and 'SDRAM MODEL ERROR' not in out
+    cyc = re.search(r'^retired \d+ instructions in (\d+) cycles', out, re.M)
+    print(f"{'yload_qs':15s} {'PASS' if ok else 'FAIL'}   {cyc.group(1) if cyc else '?'} cyc"
+          f"{'' if ok else ' -- tx=' + repr(tx[:8]) + ' x10=' + (m[-1] if m else 'none')}")
+    npass += ok; nfail += (not ok)
+else:
+    print(f"{'yload_qs':15s} SKIP   build sw/bootrom first"); nskip += 1
 print(f'\n{npass} passed, {nfail} failed, {nskip} skipped')
 sys.exit(1 if nfail else 0)

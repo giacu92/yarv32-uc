@@ -42,6 +42,7 @@ RTL := \
 	$(SNAP)/src/ips/sdram-controller/rtl/sdram_controller.v \
 	$(SNAP)/sim/sdram_model.sv \
 	$(PERI_RTL) \
+	$(abspath ..)/spi_flash_model.sv \
 	sim_soc.sv
 TOP := obj_soc/Vsim_top
 VFLAGS := --cc --exe --build --top-module sim_top -Mdir obj_soc -CFLAGS -DSOC_BUILD \

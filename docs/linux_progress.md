@@ -440,3 +440,18 @@ the frame at offset 0x200000, e.g. with `openFPGALoader --external-flash
   `~/.ssh/id_ed25519` is not registered on GitHub). To push:
   `git -C src/sub/yarv32-native-caches push -u origin m4-resource`
   from a machine/account with access.
+
+### Paused (2026-11-27, owner: "pause")
+- **CoreMark on the SoC** (cache pin `f6c8fe5`, before M6 bursts):
+  **617 529 cycles/iteration = 1.61 CoreMark/MHz**, CRCs correct (BSRAM:
+  413 411 = 2.41). CPI 2.075: load-wait 0.355, lsu-launch 0.252, imem-starve
+  0.260, redirect 0.077. The misses are where the cost is, which M6 targets.
+- RAM base decision **D21: Linux at 0x8000_0000**. The cache decodes bits
+  [23:0] only, so 0x8000_0000 aliases SDRAM 0. The SoC CPU now uses
+  `IMEM_ADDR_W = 32` (no fetch fault). `fetch_stage.sv` computes the fault
+  as `|(pc >> IMEM_ADDR_W)` so a width of 32 is legal (same wires below 32).
+  BSRAM regress 19/19, SoC regress 17/0/1.
+- Workers A (M6 bursts, then the cache side of M7) and C (QEMU boot of the
+  trimmed nommu kernel, DT at 0x80000000, built-in DTB) were both resumed and
+  then stopped by the API usage limit. Resume them with SendMessage. C was
+  told about the 0x80000000 base.

@@ -131,11 +131,12 @@ module sim_top #(
     wire        meip;
 
     // -----------------------------------------------------------------
-    // CPU. Boots from the bootrom; IMEM_ADDR_W = 24 so every address the
-    // cache decodes is fetchable and anything above 16 MiB faults.
+    // CPU. Boots from the bootrom. IMEM_ADDR_W = 32: no fetch fault at all,
+    // because the cache decodes only bits [23:0] and 0x8000_0000 -- the
+    // standard RV32 nommu kernel load address -- must alias SDRAM 0.
     // -----------------------------------------------------------------
     rv32imac_zicsr_zifencei #(
-        .IMEM_ADDR_W       (24),
+        .IMEM_ADDR_W       (32),  // no fetch fault: 0x8000_0000 aliases SDRAM (Linux load address)
         .BP_EN             (BP_EN),
         .MUL_SHARED_DSP    (MUL_SHARED_DSP),
         .BP_PUSH_LOOKUP    (BP_PUSH_LOOKUP),

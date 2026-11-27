@@ -305,7 +305,10 @@ module fetch_stage #(
     // PC outside the implemented I-mem: no bus request, synthesise a fault
     // FIFO entry instead (the memory would alias an out-of-range read back
     // into the image and execute it).
-    wire pc_fault = |pc_q[XLEN-1:IMEM_ADDR_W];
+    // Written as a constant shift rather than a part-select so IMEM_ADDR_W =
+    // XLEN (no fault boundary: the Linux SoC, where 0x8000_0000 aliases SDRAM)
+    // is legal and reduces to 0. For IMEM_ADDR_W < XLEN it is the same wires.
+    wire pc_fault = |(pc_q >> IMEM_ADDR_W);
 
     // Read response accepted this cycle.
     wire rsp_cap = imem_rsp_i.rvalid && imem_req_o.rready;
@@ -419,7 +422,7 @@ module fetch_stage #(
     // decodes IMEM_ADDR_W bits, so its answer is an alias of real
     // instructions: drop it and push one fault entry stamped with the exact
     // faulting PC instead. req_pc_q is a flop, so this check costs nothing.
-    wire rsp_fault = |req_pc_q[XLEN-1:IMEM_ADDR_W];
+    wire rsp_fault = |(req_pc_q >> IMEM_ADDR_W);  // see pc_fault
     wire do_rsp_data = do_rsp && !rsp_fault;  // push instruction words
     wire do_rsp_fault = do_rsp && rsp_fault;  // push one fault entry
     wire rsp_two = ~req_pc_q[2];  // target in low half -> push both words

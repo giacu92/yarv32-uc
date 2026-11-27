@@ -1,4 +1,4 @@
-# YARV32-uC: Yet Another RISC-V uController
+# YARV32-uC: Yet Another RISC-V ~~uController~~ uProcessor
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/giacu92/yarv32-uc)
 
@@ -7,13 +7,67 @@ GW2AR-18C** FPGA (QFN88) on a Tang Nano 20k. Hobby/learning project, built
 with Claude Code assistance. Sim-verified (Verilator + Spike co-sim) and
 **running on silicon**.
 
+## It boots Linux
+
+**Linux 6.18 (nommu) boots to a BusyBox shell on the Tang Nano 20k**, on this
+core, from the board's own 8 MiB SDRAM — first seen on silicon on 2026-11-27.
+
+```
+[    0.094699] Memory: 6028K/8192K available (862K kernel code, 369K rwdata, 129K rodata, 426K init, 37K bss, 1952K reserved, 0K cma-reserved)
+...
+Run /bin/sh as init process
+/ #
+/ # cat /proc/cpuinfo
+processor       : 0
+hart            : 0
+isa             : rv32imac_zicntr_zicsr_zifencei_zaamo_zalrsc_zca
+mmu             : none
+mvendorid       : 0x0
+marchid         : 0x0
+mimpid          : 0x0
+hart isa        : rv32imac_zicntr_zicsr_zifencei_zaamo_zalrsc_zca
+
+```
+
+What it took, on branch `linux-soc` (the MCU build below is unchanged on
+`main`):
+
+- **A extension** (LR/SC + AMOs), **minimal U-mode** (Linux nommu still runs
+  userspace in U), the Zicntr counters, illegal-CSR traps, and a WFI that
+  wakes on `mip & mie` as the spec says (Linux idles with `MIE = 0`).
+- **Write-back I/D caches over the in-package SDRAM** (8 KiB each, burst
+  refills, 15-cycle clean miss at 50 MHz), with a real `fence.i` (D-cache
+  writeback + I-cache invalidate).
+- **Standard peripherals** Linux has drivers for: 16550 UART, SiFive CLINT,
+  SiFive PLIC, SPI, GPIO, described in `docs/linux_soc.dts`.
+- **A boot ROM loader** that reads the kernel image from the **microSD card**
+  (SPI mode, raw sectors from 2048, CRC-checked, ~2.6 s for the 1.8 MB
+  image) and falls back to the UART.
+- **Timing**: the SoC top closes **50 MHz** (worst setup +0.311 ns, 57% of
+  the LUTs, 15 of 46 BSRAM).
+
+Verified before the board: the same kernel boots to the shell in the
+Verilator SoC simulation (`make -C sim/soc linux`, `make -C sim/soc
+linux-sd`, prompt ~4 s after reset at 50 MHz) and on Spike; the riscv-tests
+suite, an SDRAM/cache torture test and the full oracle set run on the SoC
+sim. The first board run also found a bug the simulation could not see: the
+SDRAM is clocked 180 degrees out of phase on the board, and every read
+returned the next word until the read capture moved to the falling edge
+(the SoC sim now models that clock phase by default).
+Running log and decisions: `docs/linux_progress.md`; plan and go/no-go
+criteria: `docs/linux_assessment.md`.
+
+At the shell, mount `/proc` first (`mount -t proc proc /proc`): the kernel
+starts `/bin/sh` directly, with no init script.
+
 ## Architecture
 
 In-order **3-stage pipeline — Fetch / Decode / Execute** over a **Harvard**
 memory system: a read-only I-mem for fetch, a byte-strobed D-mem for the LSU,
 and AXI4-Lite kept only for peripherals. Both memories are 16 KiB
 (`ADDR_W=14`, 8 BSRAM blocks each, 16 of the device's 46). The package also
-carries 8 MiB of SDRAM on a separate die, currently unused.
+carries 8 MiB of SDRAM on a separate die, unused by this MCU build (the
+Linux SoC above runs from it).
 
 ### Fetch
 
@@ -363,8 +417,14 @@ Done: Harvard split, LSU + forwarding, Zicsr, M-mode traps with all three
 interrupt sources, UART with FIFOs, silicon bring-up, CoreMark, 64-bit
 2-outstanding fetch with instruction buffer, branch predictor, 50 MHz
 closure with the predictor enabled, I2C and SPI masters, GPIO with edge and
-level interrupts, the PLIC-style cause/claim controller for MEIP, and the
-ping-pong FFT coprocessor.
+level interrupts, the PLIC-style cause/claim controller for MEIP, the
+ping-pong FFT coprocessor, and — on `linux-soc` — the SDRAM caches, the A
+extension, minimal U-mode, the illegal-CSR trap and **Linux nommu booting on
+the board**.
+
+The Linux next step is a go/no-go review (`docs/linux_assessment.md` §6.3)
+before full Linux with an MMU (S-mode, Sv32). The MCU items below are for
+the `main` build.
 
 Next, in order:
 
@@ -372,12 +432,8 @@ Next, in order:
    target in the redirect cycle removed one of its three cycles; the other two
    are memory latency and the fetched word becoming visible. Fetching into the
    predicted path without killing the buffer at all would remove them.
-2. **Cache over the in-package 8 MiB SDRAM** — write-back set-associative
-   I/D cache behind the native interfaces. Buys capacity (programs above
-   16 KiB), not speed: BSRAM already answers in one cycle at a 100% hit rate.
-3. **Illegal-CSR-access trap** — unimplemented CSRs read 0 / ignore writes.
-4. **Vectored-mode interrupt co-sim** — only direct mode is co-simulated.
-5. **RVC sequential spanning bubble** — the branch-target case is already
+2. **Vectored-mode interrupt co-sim** — only direct mode is co-simulated.
+3. **RVC sequential spanning bubble** — the branch-target case is already
    zero-bubble; the fall-through case still costs one cycle and needs a wider
    F/D or dual-issue.
 
@@ -386,10 +442,14 @@ accesses.
 
 ## Known limitations
 
+These describe the `main` MCU build; `linux-soc` adds U-mode, the A
+extension, a real `fence.i` and 8 MiB of cached SDRAM.
+
 - Machine mode only (no S/U, no medeleg/mideleg, no PMP).
+- Unimplemented CSR addresses silently read 0 / ignore writes (fixed on
+  `main-fixes` / `linux-soc`).
 - MEIP goes through a minimal PLIC (cause/claim, fixed lower-ID priority) —
   no per-source priority or threshold registers.
-- Unimplemented CSR addresses silently read 0 / ignore writes.
 - `fence.i` is a nop; no self-modifying code.
 - Forward path is distance-1 only (correct: in-order, at most one writeback
   per cycle).

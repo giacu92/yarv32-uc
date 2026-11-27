@@ -121,7 +121,9 @@ PROG = [
     (None,            "csrs",  ("mstatus", "t1")),
     (None,            "li",    ("t0", 0x10014000)),
     (None,            "sw",    ("x0", 4, "t0")),
-    (None,            "li",    ("t1", 400)),
+    (None,            "li",    ("t2", 0x1001BFF8)),
+    (None,            "lw",    ("t1", 0, "t2")),
+    (None,            "addi",  ("t1", "t1", 2000)),
     (None,            "sw",    ("t1", 0, "t0")),
     # Long multi-cycle op so fetch runs ahead and fills F/D + skid: the
     # cycle the wfi retires, decode must latch the illegal word behind it

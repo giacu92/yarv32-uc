@@ -455,3 +455,58 @@ the frame at offset 0x200000, e.g. with `openFPGALoader --external-flash
   trimmed nommu kernel, DT at 0x80000000, built-in DTB) were both resumed and
   then stopped by the API usage limit. Resume them with SendMessage. C was
   told about the 0x80000000 base.
+
+## RESUME HERE (handoff for a fresh session, 2026-11-27)
+
+State: branch `linux-soc` at the commit that adds this section (parent
+`b3386a6`). Tree clean. BSRAM `make regress` 19/19, SoC regress (`sim/soc`,
+`make regress`) 17 passed / 0 failed / 1 skipped (ifault). Cache submodule pinned
+at `f6c8fe5` (local branch `m4-resource`, plus an empty `m6-burst` at the same
+commit). No agents are running; the old worker IDs cannot be resumed from a new
+session, so start fresh agents with the briefs below.
+
+Work still to do, in order:
+
+1. **M6, SDRAM burst reads.** The target is a clean miss of 20 core cycles or
+   less (78/82/90 measured today). The work lives in the cache repo (branch
+   `m6-burst` from `f6c8fe5`) and its nested `src/ips/sdram-controller`
+   (detached at `a08a1b7`, branch `gw2ar-32bit`). No burst work was saved:
+   there is no `burst` branch and no diff, so this starts from zero.
+   Acceptance: measured miss latency, cache `make sim`/`make bist` PASS, SoC
+   regress green, CoreMark on the SoC re-measured (today 617 529 cyc/iter =
+   1.61 CM/MHz; load-wait 0.355 and imem-starve 0.260 CPI are the target).
+2. **M7, cache side of fence.i.** Add `fencei_req_i`/`fencei_ack_o` to
+   `cache_cntrl` (write back the D-cache, invalidate the I-cache), add a
+   `sim_top` phase in the cache repo, then wire it to the CPU in
+   `sim/soc/sim_soc.sv`. The CPU side is done (`EX_FENCEI`, `fencei_req_o`);
+   today `fencei_ack_i` is tied to 1. Remove `rv32ui-fence_i` from the XFAIL
+   list once it passes on the SoC.
+3. **M4b, cell reduction.** The cache is about 7.8k yosys cells against a
+   2-3k provisional budget (D14: keep C1, keep reducing).
+4. **M10 on QEMU (worker C area, `~/yarv-linux/`).** The kernel is linux 6.18.64,
+   RV32 nommu M-mode, 3.5 MB Image (`build.sh`, `NOTES.md`, `boot.py`). The last
+   boot (`boot-icount-8M.log`) reaches init and panics with
+   `binfmt_flat: Unable to allocate RAM for process text/data, errno -12`:
+   8 MiB is too tight for the flat `/bin/sh`. Next, cut memory use: a smaller
+   initramfs, fewer built-ins, a smaller kernel `LOG_BUF`, a static busybox
+   with a smaller stack, or an XIP-less trim. Then report the icount to
+   shell, the footprint, and the check of the CLINT 0x1001_0000, PLIC
+   0x1040_0000 and 16550 0x1000_0000 offsets against our DT. Base
+   0x8000_0000, built-in DTB.
+5. **M10 on the SoC sim**: boot the same Image on `sim/soc`. Then write the
+   §6.3 go/no-go review in `docs/linux_assessment.md`. **Stop before M11** and
+   wait for the owner's decision.
+
+Open owner items (unchanged): NG-1 (PnR on 192.168.10.36, `impl/remote_pnr.sh
+<ref> <tag>`), NG-2 (board CoreMark of build-m0-i2000; the sim figure is 412 244
+cyc/iter), NG-3 (push the cache repo `m4-resource`, since this machine has no
+GitHub credentials), NG-4 (config-flash pins, frame at 0x200000).
+
+Do not touch `~/yarv32-native-caches/` (the owner's own clone, branch
+`edit/dmem-32b`, with uncommitted edits). The submodule is the one under
+`src/sub/`. Worktree `.claude/worktrees/agent-a325591640f50a755` (M8) is already
+merged (`3afeeda`) and can be left alone.
+
+Working rules: unattended, log decisions as D22 onward, few large commits, the
+toolchain is in CLAUDE.md / memory, and the owner reports the session-limit
+percentage (stop before 95%).

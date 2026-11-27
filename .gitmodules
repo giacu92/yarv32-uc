@@ -1,3 +1,6 @@
 [submodule "sim/sw/compliance/riscv-tests"]
 	path = sim/sw/compliance/riscv-tests
 	url = https://github.com/riscv-software-src/riscv-tests.git
+[submodule "src/sub/yarv32-native-caches"]
+	path = src/sub/yarv32-native-caches
+	url = https://github.com/giacu92/yarv32-native-caches.git

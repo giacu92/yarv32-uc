@@ -343,3 +343,14 @@ Both may finish after this log entry; their results go in the next session.
 Remaining in order: finish M5 (fix above, then regress on the SoC,
 quicksort/amo cosim, CoreMark relinked unified, PnR → NG-1), M6, M7 proper
 (cache clean+invalidate ack), M9 (loader on 16550 + SPI flash), M10, §6.3 review.
+
+**Workers stopped at the same point (2026-11-27):**
+- A: committed `781c0b4` "store only what the request machinery reads
+  (M4b step A)" on `m4-resource` (not yet pinned; the pin stays `412e656`).
+  It also left an **uncommitted** edit in `src/rtl/cache_cntrl.sv` of the
+  cache repo: its next M4b step, unreviewed. Left untouched. Review it or
+  discard it (`git -C src/sub/yarv32-native-caches diff`) when resuming.
+- C: the RV32 nommu 6.18 kernel built in `~/yarv-linux/` (`Image`
+  3 501 464 B, initramfs built in). It was about to boot it on QEMU with
+  8 MiB and icount. NOTES.md / build.sh state is whatever it wrote; verify
+  them before relying on them.

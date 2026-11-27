@@ -73,3 +73,13 @@ sim/sw/coremark/build-*/
 sim/soc/obj_soc/
 sim/soc/snap/
 sim/soc/img/
+sim/soc/linux_run/
+sim/soc/sim_uart_tx.txt
+sim/soc/sim_events.txt
+sim/sim_events.txt
+sim/soc/linux_flash_run/
+sim/soc/obj_flash/
+sim/soc/obj_fwd/sim/soc/obj*/
+sim/soc/snap*/
+sim/soc/linux_sd_run/
+sim/soc/__pycache__/

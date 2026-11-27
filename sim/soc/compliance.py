@@ -12,7 +12,7 @@ import os, re, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SIM = os.path.dirname(HERE)
-BIN = os.path.join(HERE, 'obj_soc', 'Vsim_top')
+BIN = os.environ.get('SOC_BIN', os.path.join(HERE, 'obj_soc', 'Vsim_top'))
 BUILD = os.path.join(SIM, 'sw', 'compliance', 'build')
 XFAIL = {
     'rv32ui-ma_data': '539',  # misaligned load/store traps; the test has no handler

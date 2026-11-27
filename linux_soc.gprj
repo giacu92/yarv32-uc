@@ -1,0 +1,35 @@
+<?xml version="1" encoding="UTF-8"?>
+<!DOCTYPE gowin-fpga-project>
+<Project>
+    <Template>FPGA</Template>
+    <Version>5</Version>
+    <Device name="GW2AR-18C" pn="GW2AR-LV18QN88C8/I7">gw2ar18c-000</Device>
+    <FileList>
+        <File path="src/rtl/pkg/rv32_pkg.sv" type="file.verilog" enable="1"/>
+        <File path="impl/soc_rtl/yarv32_cache_pkg.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/bus/axi4_lite_if.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/bus/axi4_lite_master_bridge.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/bus/axi4_lite_xbar.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/core/fetch_stage.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/core/reg_file.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/core/csr_regfile.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/core/decode_stage.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/core/trap_unit.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/core/alu.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/core/branch_predictor.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/core/execute_stage.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/core/rv32imac_zicsr_zifencei.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/utils/dport_32to64.sv" type="file.verilog" enable="1"/>
+        <File path="impl/soc_rtl/native_ram_cache.sv" type="file.verilog" enable="1"/>
+        <File path="impl/soc_rtl/cache_cntrl.sv" type="file.verilog" enable="1"/>
+        <File path="impl/soc_rtl/sdram_controller.v" type="file.verilog" enable="1"/>
+        <File path="src/rtl/utils/clint.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/utils/axi4_lite_uart16550.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/utils/axi4_lite_spi.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/utils/axi4_lite_gpio.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/utils/axi4_lite_plic_sifive.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/soc/top_soc.sv" type="file.verilog" enable="1"/>
+        <File path="src/phys/linux_soc.cst" type="file.cst" enable="1"/>
+        <File path="src/phys/linux_soc.sdc" type="file.sdc" enable="1"/>
+    </FileList>
+</Project>

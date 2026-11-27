@@ -592,8 +592,19 @@ module decode_stage #(
     // result is ready, and decode is parked (stall_i) through the whole
     // busy/wait window.
     // =================================================================
-    wire fwd_rs1 = ex_wb_en_i & (ex_wb_addr_i != 5'd0) & (rs1_addr_dec == ex_wb_addr_i);
-    wire fwd_rs2 = ex_wb_en_i & (ex_wb_addr_i != 5'd0) & (rs2_addr_dec == ex_wb_addr_i);
+    //
+    // The address compare uses the RAW instruction fields and the use flags are
+    // ANDed in last. Same function as comparing rs*_addr_dec (= uses ? field :
+    // 0, and x0 never forwards), but the 5-bit compare and its carry chain no
+    // longer wait for uses_rs*, which come out of the bottom of the decoder
+    // case tree. Linux SoC PnR run soc-r1 (2026-11-27): all 17 failing setup
+    // endpoints were de_q.rs1_data, through decoded_valid -> imm -> is_lr ->
+    // wb_src -> rs1_addr -> this comparator, -0.246 ns. The old expression is
+    // kept as an equivalence assertion under `ifdef VERILATOR` below.
+    logic [4:0] rd_field, rs1_field, rs2_field;  // decoder fields, declared before use
+    logic uses_rs1, uses_rs2;
+    wire fwd_rs1 = ex_wb_en_i & (ex_wb_addr_i != 5'd0) & (rs1_field == ex_wb_addr_i) & uses_rs1;
+    wire fwd_rs2 = ex_wb_en_i & (ex_wb_addr_i != 5'd0) & (rs2_field == ex_wb_addr_i) & uses_rs2;
 
     wire [XLEN-1:0] rs1_fwd = fwd_rs1 ? ex_wb_data_i : rs1_data_i;
     wire [XLEN-1:0] rs2_fwd = fwd_rs2 ? ex_wb_data_i : rs2_data_i;
@@ -688,20 +699,18 @@ module decode_stage #(
     logic funct7b5;  // funct7[5] — SUB/SRA, M-ext
     logic [11:0] funct12;
     logic aq, rl;  // AMO ordering bits (instr[26:25]) — must be 0 for Zilx
-    logic [4:0] rd_field, rs1_field, rs2_field;
     logic is_m_ext;
 
     // ---- Immediates (sign-extended) ----
     logic [31:0] imm_i, imm_s, imm_b, imm_u, imm_j;
 
     // ---- Decoded control (defaults; recognised opcodes override) ----
-    logic [31:0] imm;
-    logic uses_rs1, uses_rs2;
-    logic       reg_write;
-    logic       csr_wren;
-    alu_op_t    alu_op;
-    alu_src_a_t alu_src_a;
-    alu_src_b_t alu_src_b;
+    logic       [31:0] imm;
+    logic              reg_write;
+    logic              csr_wren;
+    alu_op_t           alu_op;
+    alu_src_a_t        alu_src_a;
+    alu_src_b_t        alu_src_b;
     logic mem_read, mem_write;
     mem_size_t            mem_size;
     logic                 mem_unsigned;
@@ -1831,6 +1840,14 @@ module decode_stage #(
     end
 
 `ifdef VERILATOR
+    // Forwarding-compare rewrite (soc-r1): must equal the original form.
+    always_ff @(posedge clk_i) begin
+        if (fwd_rs1 != (ex_wb_en_i & (ex_wb_addr_i != 5'd0) & (rs1_addr_dec == ex_wb_addr_i)))
+            $fatal(1, "decode: fwd_rs1 rewrite diverges from rs1_addr_dec compare");
+        if (fwd_rs2 != (ex_wb_en_i & (ex_wb_addr_i != 5'd0) & (rs2_addr_dec == ex_wb_addr_i)))
+            $fatal(1, "decode: fwd_rs2 rewrite diverges from rs2_addr_dec compare");
+    end
+
     // =================================================================
     // Predictor fast-path equivalence (simulation only)
     //

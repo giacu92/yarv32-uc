@@ -43,6 +43,7 @@ RTL := \
 	$(SNAP)/sim/sdram_model.sv \
 	$(PERI_RTL) \
 	$(abspath ..)/spi_flash_model.sv \
+	$(abspath ..)/sd_spi_model.sv \
 	sim_soc.sv
 TOP := obj_soc/Vsim_top
 VFLAGS := --cc --exe --build --top-module sim_top -Mdir obj_soc -CFLAGS -DSOC_BUILD \
@@ -59,12 +60,12 @@ $(SNAP)/.done:
 	    $(SNAP)/src/rtl/native_ram.sv $(SNAP)/src/rtl/cache_cntrl.sv
 	touch $@
 
-$(TOP): $(SNAP)/.done ../sim_main.cpp sim_soc.sv $(filter $(CORE)/%,$(RTL))
+$(TOP): $(SNAP)/.done ../sim_main.cpp sim_soc.sv ../spi_flash_model.sv ../sd_spi_model.sv $(filter $(CORE)/%,$(RTL))
 	verilator $(VFLAGS) ../sim_main.cpp $(RTL)
 
 build: $(TOP)
 clean:
-	rm -rf obj_soc snap img
+	rm -rf obj_soc snap img linux_run linux_flash_run linux_sd_run
 
 .PHONY: build clean
 
@@ -74,3 +75,19 @@ regress: $(TOP)
 compliance: $(TOP)
 	python3 compliance.py
 .PHONY: compliance
+
+# Boot the nommu kernel to the BusyBox shell (M10). Pass = the shell echoes
+# BOOT-OK. Reports cycles to `Run /bin/sh` and to the first prompt, and the
+# number of misaligned-access traps the kernel took. ~5-10 min of wall time.
+LINUX_IMAGE ?= $(HOME)/yarv-linux/soc/Image
+linux: $(TOP)
+	python3 linux.py $(LINUX_IMAGE) linux_run
+# Same, booted the board's way: M9 loader ROM, Image as a yload frame at
+# 2 MiB in the SPI flash model. Copying 1.8 MB over SPI adds a long prefix.
+linux-flash: $(TOP)
+	python3 linux.py $(LINUX_IMAGE) linux_flash_run --flash
+# The board's way since M9b (D42): Image as a yload frame at sector 2048 of
+# the SPI-mode SD card model (+SDCARD). SD_ARGS=+SDSC for a byte-addressed card.
+linux-sd: $(TOP)
+	python3 linux.py $(LINUX_IMAGE) linux_sd_run --sd
+.PHONY: linux linux-flash linux-sd

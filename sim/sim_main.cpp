@@ -133,9 +133,26 @@ public:
         return e ? atol(e) : 0;
     }
 
+    // UART_RX_WAIT=<string> (SoC build): stay idle until the console has
+    // printed <string> (e.g. a shell prompt), THEN count UART_RX_START cycles
+    // and start typing. For input whose listener starts at a time nobody can
+    // predict, e.g. a kernel loaded by the boot loader first.
+    static std::string wait_for() {
+        const char *e = getenv("UART_RX_WAIT");
+        return e ? std::string(e) : std::string();
+    }
+
     explicit UartRxDriver(std::string bytes)
         : bytes_(std::move(bytes)), bit_cycles_(bit_cycles()), paced_(paced()),
-          gap_(start_cycles()) {}
+          gap_(start_cycles()), wait_(wait_for()) {}
+
+    // Feed one console TX byte (only matters while waiting).
+    void observe_tx(char c) {
+        if (wait_.empty()) return;
+        tail_.push_back(c);
+        if (tail_.size() > wait_.size()) tail_.erase(0, tail_.size() - wait_.size());
+        if (tail_ == wait_) wait_.clear();
+    }
 
     bool done() const { return idx_ >= (int)bytes_.size() && !active_; }
     int  sent() const { return idx_ - (active_ ? 1 : 0); }
@@ -150,6 +167,7 @@ public:
     // input, so it must be reproducible here.
     int step(bool blocked) {
         if (!active_) {
+            if (!wait_.empty()) return 1;
             if (gap_ > 0) { --gap_; return 1; }
             if (idx_ >= (int)bytes_.size() || (paced_ && blocked)) return 1;
             cur_    = (uint8_t)bytes_[idx_++];
@@ -178,6 +196,8 @@ private:
     int         bit_    = 0;
     int         cnt_    = 0;
     long        gap_    = 0;
+    std::string wait_;
+    std::string tail_;
 };
 
 // Decode C-style escapes in the UART_RX env string so a shell can pass
@@ -456,6 +476,9 @@ int main(int argc, char** argv) {
     int cyc;
     for (cyc = 0; cyc < max_cyc; ++cyc) {
         // UART RX line level for this clock period, paced off the RX FIFO.
+#ifdef SOC_BUILD
+        if (UTAP(tx_push)) rx_drv.observe_tx((char)(UTAP(wdata_eff) & 0xff));
+#endif
         top->uart_rxd_i = rx_drv.step(UTAP(rx_fifo_full) != 0);
 
         // Low half: de_q holds the op about to retire at this edge; sample

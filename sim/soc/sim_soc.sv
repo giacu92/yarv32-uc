@@ -247,8 +247,18 @@ module sim_top #(
         .dbg_hb_o     ()
     );
 
+    // +SDRAM_CLK180: clock the SDRAM model on the INVERTED clock, which is
+    // what the board does (top_soc.sv: CLKOUTP, PSDA_SEL "1000" = 180 deg).
+    // The device then samples commands and drives read data half a cycle
+    // earlier than in the default in-phase sim. The default sim cannot see
+    // a read-capture problem that depends on that phase; this switch can
+    // (2026-11-27: the board read every word one burst slot late).
+    logic sdram_clk180;
+    initial sdram_clk180 = $test$plusargs("SDRAM_CLK180");
+    wire sd_clk_dev = sdram_clk180 ? ~sd_clk : sd_clk;
+
     sdram_model u_sdram (
-        .clk  (sd_clk),
+        .clk  (sd_clk_dev),
         .cke  (sd_cke),
         .cs_n (sd_cs_n),
         .ras_n(sd_ras_n),
@@ -419,17 +429,36 @@ module sim_top #(
     assign peri_rresp[2+:2]     = axi_bus_spi.rresp;
     assign peri_rdata[32+:32]   = axi_bus_spi.rdata;
 
-    wire spi_sck, spi_mosi, spi_cs_n, spi_miso, flash_miso;
-    // +SPIFLASH: MISO comes from a serial NOR flash model (M9 boot path,
-    // preloaded with +FINIT=<hex>); otherwise the loopback spi_loop expects.
-    bit spi_flash_en;
-    initial spi_flash_en = $test$plusargs("SPIFLASH");
-    assign spi_miso = spi_flash_en ? flash_miso : spi_mosi;
+    wire spi_sck, spi_mosi, spi_cs_n, spi_miso, flash_miso, sd_miso;
+    // MISO source: +SDCARD -> SD card model in SPI mode (M9b, +SDINIT=<hex>);
+    // +SPIFLASH -> serial NOR flash model (M9, +FINIT=<hex>); otherwise the
+    // loopback spi_loop expects (MISO = MOSI).
+    bit spi_flash_en, sd_en;
+    initial begin
+        spi_flash_en = $test$plusargs("SPIFLASH");
+        sd_en        = $test$plusargs("SDCARD");
+    end
+    wire spi_miso_pin = sd_en ? sd_miso : spi_flash_en ? flash_miso : spi_mosi;
+    // Board parity: top_soc double-flops the asynchronous MISO pin before the
+    // SPI master, so every source here sees the same 2-cycle latency.
+    logic [1:0] spi_miso_sync_q = 2'b11;
+    always_ff @(posedge clk_i) begin
+        if (!rstn_i) spi_miso_sync_q <= 2'b11;
+        else spi_miso_sync_q <= {spi_miso_sync_q[0], spi_miso_pin};
+    end
+    assign spi_miso = spi_miso_sync_q[1];
     spi_flash_model u_flash (
         .sck (spi_sck),
         .cs_n(spi_cs_n),
         .mosi(spi_mosi),
         .miso(flash_miso)
+    );
+    sd_spi_model u_sd (
+        .clk (clk_i),
+        .sck (spi_sck),
+        .cs_n(spi_cs_n),
+        .mosi(spi_mosi),
+        .miso(sd_miso)
     );
 
     axi4_lite_spi u_spi (
@@ -438,7 +467,7 @@ module sim_top #(
         .axi       (axi_bus_spi.slave),
         .spi_sck_o (spi_sck),
         .spi_mosi_o(spi_mosi),
-        .spi_miso_i(spi_miso),           // loopback, or the flash model (+SPIFLASH)
+        .spi_miso_i(spi_miso),           // synchronised: loopback, flash or SD model
         .spi_cs_n_o(spi_cs_n),
         .spi_irq_o (spi_irq)
     );
@@ -591,16 +620,37 @@ module sim_top #(
     // pin will carry.
     // -----------------------------------------------------------------
 `ifdef VERILATOR
-    int uart_log_fd;
+    int     uart_log_fd;
+    // Event log with cycle stamps, for `make linux` (linux.py): one line per
+    // TX byte ("U <cycle> <hex byte>") and one per misaligned-access trap
+    // ("M <cycle> <mtval>"). The misaligned line answers whether the kernel's
+    // misaligned-access emulation ever ran, which QEMU never exercised.
+    int     evt_log_fd;
+    longint sim_cyc_q;
+    logic   mis_q;
 
     initial begin
         uart_log_fd = $fopen("sim_uart_tx.txt", "w");
+        evt_log_fd  = $fopen("sim_events.txt", "w");
     end
 
     always_ff @(posedge clk_i) begin
+        if (!rstn_i) begin
+            sim_cyc_q <= 0;
+            mis_q     <= 1'b0;
+        end else begin
+            sim_cyc_q <= sim_cyc_q + 1;
+            mis_q     <= u_cpu.u_execute.misaligned_trap;
+            if (u_cpu.u_execute.misaligned_trap && !mis_q) begin
+                $fwrite(evt_log_fd, "M %0d %08x\n", sim_cyc_q, u_cpu.u_execute.mem_addr_q);
+                $fflush(evt_log_fd);
+            end
+        end
         if (rstn_i && u_uart.tx_push) begin
             $fwrite(uart_log_fd, "%c", u_uart.wdata_eff[7:0]);
             $fflush(uart_log_fd);
+            $fwrite(evt_log_fd, "U %0d %02x\n", sim_cyc_q, u_uart.wdata_eff[7:0]);
+            $fflush(evt_log_fd);
         end
     end
 `endif

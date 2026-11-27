@@ -574,6 +574,7 @@ as they happen.
 | **M7** | `fence.i`: clean dirty D-lines, invalidate I-cache, kill buffer, refetch | branch | `rv32ui-fence_i` and `rv32uc-rvc` XPASS; self-modifying-code oracle (write code through D, `fence.i`, execute it); the torture test extended with code-write phases | — |
 | **M8** | **Standard-compatible peripherals, no new drivers:** CLINT in the SiFive layout (`msip` +0x0, `mtimecmp` +0x4000, `mtime` +0xBFF8, one 64 KiB window); PLIC compatible with `sifive,plic-1.0.0` (per-source priority, pending +0x1000, enables +0x2000 + 0x80·ctx, threshold/claim-complete +0x200000 + 0x1000·ctx, gateway holding a claimed source until complete, contexts 0 = M and 1 = S); **16550-compatible UART** (`ns16550a`, `reg-shift = 2`, `reg-io-width = 4`); DT nodes for all of them | branch | Extended TBs (`plic_tb`, `uart_tb`, timer TB) check each register at the offset the mainline driver uses. Driver offsets are taken from the pinned 6.18 sources (`timer-clint.c`, `irq-sifive-plic.c`, `8250_of.c`) and quoted in the TB. Firmware oracles ported. OpenSBI's `fdt_serial`/`aclint`/`plic` drivers probe them in Spike-equivalent sim | — |
 | **M9** | Boot ROM loader: UART (CRC-checked) first, then **SPI flash** via `axi4_lite_spi` | branch | Board: CoreMark loaded from SPI flash into SDRAM and run to `crcfinal=0x4983` | **Load time for a 1 MiB and a 4 MiB image, UART and SPI** |
+| **M9b** | **Boot from the microSD card** (added 2026-11-27, owner request): SPI mode on the existing `axi4_lite_spi`, moved to the TF slot pins (CLK 83, CMD 82, DAT0 84, DAT3 81); loader order SD -> UART; the yload frame in raw sectors at sector 2048, no FAT; faster CRC in the loader | branch | SD-SPI sim model (SDHC + SDSC), `yload_sd` in the SoC regress, `make linux-sd` to `BOOT-OK`; board: Linux from the card | **Load time of the Linux Image from SD**; replaces the configuration-flash path and closes NG-4 |
 | **M10** | **Route A gate:** 6.18 LTS `rv32_nommu_virt`-derived config + BusyBox initramfs, to a shell | branch | Shell prompt in Verilator (`NO_VCD`, long run) and on the board; Spike boots the same image with the same DT; **go/no-go review before Route B** | **Power-on to shell**, split into load / kernel / init |
 | **M11** | Privilege: U/S, `medeleg`/`mideleg`, S-CSRs, `sret`, TSR/TVM/TW, ecall 8/9 | branch | `rv32si` enabled; remaining `rv32mi`; riscv-arch-test privilege suite where applicable; co-sim of S-mode test programs; PnR ×3 | nommu image still boots (regression), time reported |
 | **M12** | Sv32: I/D TLB, hardware PTW, VIPT tag compare, `sfence.vma`, page faults 12/13/15, Svade | branch | riscv-tests **`v` environment** (`rv32ui`/`um`/`ua` re-run under paging); PTW corner-case oracle (superpages, permission and A/D faults); PnR ×3. **Most likely milestone to move the limiter** | nommu regression boot |
@@ -641,6 +642,43 @@ Otherwise **CONDITIONAL**, listing the mitigations. Rows that could not be
 measured because the board or the Gowin host was unavailable are reported as
 **UNMEASURED**. An UNMEASURED LUT, timing or boot row makes the verdict at
 best CONDITIONAL.
+
+### 6.4 Milestone status and provisional post-M10 review (2026-11-27)
+
+**Status.** Done in simulation and verified as stated in
+`docs/linux_progress.md`: M0-M8, M9 (UART + flash loader), M10 in Verilator
+(shell, `make -C sim/soc linux`) and on Spike (same kernel, a Spike DT).
+**M10 is not complete**: its acceptance also asks for the shell on the
+board and the power-on-to-shell time, and the review below is
+CONDITIONAL. Open: M9b (SD boot, new), the board half of M5/M9/M10, and
+the loader -> kernel path in simulation. **Update (evening):** loader ->
+kernel proven in sim through the SD path (`make -C sim/soc linux-sd`, prompt
+at 3.97 s); M9b done in sim; on the board the SDRAM read capture was wrong
+(180-degree device clock) and is fixed (D43, probe passes on the board); the
+Linux **booted on the board** on `soc-r3` (UART load); timing of the boot and 5/5 reliability are the next owner steps. M11-M13 not started
+(stop point).
+
+**Review by the §6.3 criteria** (soc-r1 = first GowinSynthesis + PnR of the
+SoC top, owner-run, one run, reports in `impl/runs/soc-r1/`):
+
+| Criterion | Evidence | Verdict |
+|---|---|---|
+| Free LUT4 | 11 754 / 20 736 used (GowinSynthesis), 43% free | **GO** |
+| Free FF | 4 177 / 15 915 used, 73% free | **GO** |
+| Free BSRAM | 15 / 46 used, 31 free | **GO** |
+| Timing | soc-r1: 49.392 MHz, -0.246 ns; soc-r2 (D38): **50 MHz closed, +0.015 ns**, one run (not a 3-seed median); limiter still `head_q -> decoder` | **CONDITIONAL** (≥ 40 MHz with < +0.7 ns); provisional until ≥ 3 seeds |
+| Limiter location | `fetch head_q -> decoder -> forwarding compare -> de_q.rs1_data`: not the cache tag-compare / hit path | **GO** (provisional, same single run) |
+| Boot time | Board UNMEASURED. Sim: kernel to first prompt 1.46 s at 50 MHz; loader 159 s over UART; **from SD (M9b) prompt at 3.97 s from reset** (`make -C sim/soc linux-sd`) | **UNMEASURED** (sim estimate in the GO range: ≤ 5 min even over UART) |
+| Boot reliability | **Linux booted to a shell on the board** (`soc-r3`, UART load, 2026-11-27); 5 consecutive boots not yet run | **UNMEASURED** (1 boot seen) |
+| Correctness | BSRAM regress 20/20, SoC regress 19 + 1 documented skip (ifault: 16 MiB fault boundary), compliance 73 + 4 / 75 + 2 documented XFAILs, torture test A-D mutation-checked, cosims PASS | **GO** |
+
+**Verdict: CONDITIONAL.** No row is NO-GO; timing is CONDITIONAL and two
+rows are UNMEASURED. To turn it into GO the owner must: (1) PnR `soc-r2`
+(and confirm over ≥ 3 seeds, or one run + a re-run if gw_sh has no seed
+option) to ≥ +0.7 ns median at 50 MHz, or accept a lower clock; (2) boot
+Linux on the board 5 times in a row with `~/yarv-boot/yboot.py` (later from
+SD) and record power-on to shell. A NO-GO would be: timing not closing at
+25 MHz, or fewer than 4/5 boots, or a boot slower than 15 min.
 
 ### Decisions of 2026-11-22 (second review)
 

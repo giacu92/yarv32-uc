@@ -615,4 +615,298 @@ the new `misa`.
   cached byte/half/word ops over 64 KiB with a shadow, then fence.i +
   CACHE_BYPASS device reads, then bypass writes read back cached. PASS,
   9.5 M cycles. Not yet in the SoC regress and not yet mutation-checked.
-- Next steps and owner items: `docs/linux_resume_prompt.md`.
+- Next steps and owner items: the resume prompt (kept outside git).
+
+## Session 3, continued (2026-11-27): the resume-prompt list, items 1-7
+
+### Torture test: in the SoC regress, and phase B made non-vacuous
+- `sim/soc/regress.py` runs `soc_torture` after the `REGRESS_TESTS` list
+  (SoC only: its SDRAM addresses alias on the BSRAM build). Bound
+  2 000 000 × 8 + 20 000 cycles; it takes 12.6 M.
+- **Mutant 1, dirty victim never written back** (`S_ARBITRATE`, the
+  `S_WB_READ` decision): caught, but in **phase A** (`0xBAD`, phase `0xA1`):
+  the refill brings back stale SDRAM data, which the shadow sees at once.
+- **Mutant 2, fence.i flush skips its writeback** (`S_FI_CHK`): **PASSED**
+  the original test. Phase B, which exists to catch exactly this, was
+  vacuous for two independent reasons:
+  1. it compared device R against device S, but R and S are 64 KiB apart,
+     i.e. the same cache sets, so a lost writeback leaves both stale at the
+     same offset and the comparison sees equal values;
+  2. the last `compare_all` of phase A sweeps 128 KiB through an 8 KiB
+     cache, which evicts every dirty line through the ordinary victim
+     writeback: at the fence.i **nothing was dirty**, so the flush had
+     nothing to lose. A first fix (digest instead of R-vs-S) still passed
+     for this second reason.
+  Phase B now takes an additive checksum of R through the cache, rewrites
+  4 KiB of R and S (R in one way, S in the other of the same sets) updating
+  the expected checksum word by word, executes fence.i with no cached access
+  to R/S in between, and checks both device checksums against it. Mutant 2
+  now fails in phase B (`0xBAD`, phase `0xB0`); the clean build passes.
+- Mutants were applied to a private copy of the build snapshot
+  (`sim/soc/snapmut`, built in `obj_mut`), never the submodule or the shared
+  `snap/<pin>` (a regress was reading it at the time); both deleted after.
+- Lesson, short: **a coherence check must make sure the state it checks
+  exists at the instant it checks it.** "Every dirty line written back"
+  passes trivially when no line is dirty.
+
+### `make linux` (sim/soc)
+`make -C sim/soc linux [LINUX_IMAGE=...]` (default `~/yarv-linux/soc/Image`)
+runs `linux.py`: raw Image -> word hex, `bootrom_linux.hex`, types
+`mount -t proc proc /proc`, `cat /proc/meminfo`, `free`, `uname -a`,
+`ls /`, `echo BOOT-OK` from cycle 60 M, and stops the simulation as soon as
+the shell prints a line that is exactly `BOOT-OK`. `sim_soc.sv` now also
+writes `sim_events.txt` (cycle stamp per TX byte and per misaligned trap),
+which is where the timings come from.
+
+| | cycles | at 50 MHz |
+|---|---|---|
+| `Run /bin/sh as init process` line | 51 272 437 | 1.025 s |
+| first shell prompt | 73 149 888 | 1.463 s |
+| wall time of the run | | 416 s |
+
+The first prompt arrives after the typed input started (60 M); the
+input is buffered by the 16550 and answered in order, so the prompt
+figure is an upper bound on boot. `free`: total 6 664 kB, used 708,
+free 5 604 (QEMU 5 340 free).
+**Misaligned-access emulation ran exactly once**: one trap at cycle
+22 556 222, mtval 0x801e3e6d — the kernel's own
+`check_unaligned_access_emulated` probe (Spike shows the same single trap at
+the same place, below). Neither the boot nor BusyBox nor the typed
+commands made any other misaligned access.
+
+### Spike boot (M10 acceptance item): DONE
+Same kernel source and config, one config line changed
+(`CONFIG_BUILTIN_DTB_NAME` -> `yarv/yarv-spike`), same initramfs; the DT
+moves the devices to Spike's addresses (CLINT 0x0200_0000, PLIC
+0x0c00_0000 with only context 11 since `--priv=mu` creates no S context,
+16550 reg-shift 0 / io-width 1 / 10 MHz, timebase 10 MHz). The raw Image is
+wrapped in an ELF at 0x8000_0000. Everything lives outside this repo in
+`~/yarv-linux/spike/` (`build-spike-image.sh`, `run-spike.sh`,
+`NOTES-spike.md`, `yarv-soc-to-spike.dts.diff`):
+
+```
+spike --isa=rv32imac_zicsr_zifencei --priv=mu -m0x80000000:0x800000 Image.elf
+```
+
+Reaches `/ # ` and answers `mount`, `ps`, `free`, `cat /proc/meminfo`,
+`cat /proc/cpuinfo`, `dmesg`, nested `sh -c`. Steps to the prompt:
+13 090 705, of which ~5.06 M are one WFI idle at the console handoff; ~8.0 M
+instructions actually executed. `Run /bin/sh` at 12 625 898 steps.
+Findings: (a) the QEMU "12.3 M instructions" in `NOTES.md` §3 came from
+printk timestamps and includes the same idle, so it is not an executed-
+instruction count; (b) Spike has PMP, so `head.S`'s `pmpaddr0` probe does not
+trap there as it does on the SoC; (c) the `--isa` string should gain
+`_zicntr` to match the SoC (nothing used it).
+
+### SoC board top (item 3) — written, lint-clean, NOT synthesised
+- `src/rtl/soc/top_soc.sv`: `sim_soc.sv` minus the SDRAM / SPI-flash
+  models; rPLL as `top_module` (25 -> 50 MHz) plus `CLKOUTP` with
+  `PSDA_SEL="1000"` (180°) as the SDRAM clock, as the cache repo's
+  `fpga_top`; reset synchronised and gated on `rst_i` and PLL lock, with a
+  power-up value on the synchroniser; UART RX, SPI MISO, GPIO
+  double-flopped; GPIO per-bit tri-state. Embedded-SDRAM ports copied
+  verbatim from `fpga_top.sv` lines 72-82: `O_sdram_clk/cke/cs_n/cas_n/
+  ras_n/wen_n`, `O_sdram_dqm[3:0]`, `O_sdram_addr[10:0]`,
+  `O_sdram_ba[1:0]`, `IO_sdram_dq[31:0]` (no `.cst` entries: the toolchain
+  binds them by name). Boot ROM = `sim/sw/bootrom/build/bootrom.hex`
+  (gitignored build product; path valid from the repo root).
+- `src/phys/linux_soc.cst` / `.sdc`, `linux_soc.gprj` (SDC as
+  `file.sdc`), `impl/remote_pnr_soc.sh <ref|WORKTREE> <tag> [seed]`.
+- `impl/soc_rtl.sh` + `impl/soc_rtl/` (from the previous session) reviewed:
+  byte-identical to the sim's `snap/d26e8df…` files.
+- `verilator --lint-only --top-module top_soc` with the sim's `-Wno-`
+  set: 0 warnings. Without it: 11, all pre-existing in core files.
+  The rPLL needs a lint stub (rv32_pkg defines `GOWIN`); none exists in the
+  repo, the one used lives outside it.
+
+### yosys estimate of the whole SoC top (item 4) — PROVISIONAL
+`impl/yosys_estimate_soc.sh` (approach and traps of `yosys_estimate.sh`).
+
+| mapping | LUT1-4 | MUX2_LUT5-8 | ALU | logic cells | FF | BSRAM | DSP | LUT-RAM |
+|---|---|---|---|---|---|---|---|---|
+| default | 12 501 | 4 434 | 1 455 | 18 390 | 3 703 | 14 | 1 MULT18X18 + 1 MULT36X36 | 152 |
+| `-nowidelut` | 9 315 | 0 | 1 451 | 10 766 | 3 703 | 14 | same | 152 |
+
+Device: 20 736 LUT4 (assessment §4.1, unverified on this die), FF limit
+15 750 (GowinSynthesis's own error message, 2026-09-15), 46 BSRAM.
+BSRAM: 8 cache data + 4 tag + bootrom (SPX9). LUT-RAM: regfile (yosys has
+no async-read BSRAM, so this inflates LUT/FF versus GowinSynthesis), PHT,
+round-robin bits, the four UART/SPI FIFOs. Fell back to flops: only small
+arrays (fetch buffer by design, two tiny ROMs) — no large memory.
+The default row is the wide-LUT packing already known to be unstable on the
+cache (D27); judge by `-nowidelut`.
+
+| # | Decision | Reasoning |
+|---|---|---|
+| D30 | `soc_torture` runs in the SoC regress only | Its SDRAM addresses alias on the 16 KiB BSRAM build |
+| D31 | Phase B checks device checksums against a cached checksum, over a window dirtied just before fence.i | The R-vs-S comparison and the dirty-free cache at fence.i each made the phase vacuous (mutant 2) |
+| D32 | Mutants built from a private copy of the snapshot (`snapmut`/`obj_mut`), deleted after | Never the submodule; the shared snapshot was in use by a running regress |
+| D33 | `make linux` passes on a shell OUTPUT line equal to `BOOT-OK`, and kills the sim there | The echo of the typed `echo BOOT-OK` must not count; the kernel otherwise idles to MAX_CYC |
+| D34 | Board reset gated on PLL lock, synchroniser has a power-up value, `-init_primitives 1` | MCU top's proven scheme plus the cache repo's reset-chain lesson. The cache repo's working `fpga_top` build 11 dropped the lock gate without a recorded reason: first thing to check if the board never leaves reset |
+| D35 | SPI on header pins 27-30 (MISO pulled up), not the configuration flash | No document in either repo settles the MSPI pins (NG-4 stays open); with no flash the loader falls back to UART |
+| D36 | Spike boot from a Spike-specific DT build kept in `~/yarv-linux/spike/` | Spike's devices are fixed at other addresses; one config line differs |
+| D37 | `remote_pnr_soc.sh` refuses a seed when `gw_sh` exposes no seed option | Gowin PnR measured deterministic (D4): N runs labelled N seeds would be one measurement |
+
+### First GowinSynthesis + PnR of the SoC top: `soc-r1` (owner-run, 2026-11-27)
+Run by the owner on 192.168.10.36 from a snapshot shipped from this working
+tree; reports in `impl/runs/soc-r1/` (gitignored). The first attempt
+failed before synthesis: the project had no process-config JSON, so the IDE
+parsed every file as Verilog 2001 (`EX3444 'package' is an unknown type`).
+Fixed with `impl/linux_soc_process_config.json` (SV2017, top `top_soc`,
+50 MHz, place 2 / route 1, plain-text timing, init primitives).
+
+| | used | device | |
+|---|---|---|---|
+| Logic (LUT + ALU + SSRAM) | 11 754 | 20 736 | 57% |
+| Registers | 4 177 | 15 915 | 27% |
+| BSRAM | 15 (12 SP, 2 pROM, 1 SDPB) | 46 | 33% |
+| DSP | 1 MULT36X36 | | |
+
+Yosys `-nowidelut` (10 766 cells) was the close estimate; the default
+mapping (18 390) was not. **Timing: 49.392 MHz against 50, worst setup
+-0.246 ns, TNS -2.628, 17 endpoints, hold clean.** Every failing endpoint is
+`de_q.rs1_data[*]` from `fetch head_q[0]`, 20 levels, 60% routing:
+`head select -> buf_fault RAMOUT -> decoded_valid -> pred_imm/imm ->
+de_d.is_lr -> wb_src -> rs1_addr -> 5-bit forwarding compare (carry chain)
+-> rs1_fwd mux`. It is the frozen design's group B, longer by the A-extension
+and U-mode terms the decoder gained on this branch: the forwarding compare
+used `rs1_addr_dec = uses_rs1 ? field : 0`, so it waited for the bottom of
+the decoder case tree.
+
+**Fix (D38):** compare the RAW field, AND `uses_rs*` in last. Same function
+(x0 never forwards; an unused field was forced to 0). The old expression is
+a `$fatal` equivalence assertion under `ifdef VERILATOR`, so every run
+proves it: BSRAM regress 20/20, SoC regress 19 + 1 skip, SoC compliance
+75 + 2, no assertion. Shipped to the host as `soc-r2`; **not yet PnR'd**.
+
+### Torture phase D: code written through the D-cache, then executed
+`phase_d()` (worker): the code region is pre-filled under bypass with
+`c.li a0,-1; c.jr ra`, so code that never reached SDRAM returns -1 instead
+of trapping; 4 rounds of cached halfword stores, one fence.i, calls through
+function pointers: routine A crosses a 32-byte line and is already in the
+I-cache from round 1, B all 32-bit, C a never-fetched line per round, S
+self-modifying (overwrites the instruction after its own fence.i). Placed in
+I sets above `.text` and away from the stack's D sets, so the lines are
+still dirty at the fence.i. Total test 12 373 026 cycles.
+
+| mutant (private copies, deleted) | phase D alone | full test |
+|---|---|---|
+| flush does not invalidate the I ways | 0xD4 (S returns OLD) | 0xD4 |
+| flush skips the D writeback | 0xD1 (returns the filler) | 0xB0 (phase B first) |
+| core: no refetch after fence.i | 0xD4 | — |
+
+This closes the M7 acceptance item "torture test extended with code-write
+phases".
+
+### Loader load time (M9 acceptance, `sim/soc/loadtime.py`)
+Measured on the SoC sim, extrapolated linearly (fit residuals: SPI 3.7 k
+cycles on 62 M, UART 2 cycles).
+
+| path | 1 MiB | 4 MiB | Linux Image (1 835 244 B) | fit |
+|---|---|---|---|---|
+| SPI flash (clk/4 = 12.5 MHz) | 4.98 s | 19.94 s | 8.72 s | 12 080 + 237.65 clk/B |
+| UART 115200 | 91.0 s | 364.1 s | 159.4 s | 4340 clk/B (line rate) |
+
+SPI is CPU-bound, not wire-bound: 32 of 238 clocks per byte shift bits, the
+rest is the bit-serial CRC loop at IPC 0.29 (data-dependent branch, ~6
+mispredicts/byte, boot-ROM fetch starvation). A branch-free CRC step or a
+nibble table would cut it several-fold; CLKDIV 0 would save only ~7%. Not
+done. The UART path is line-bound (the loader needs 193 clk/byte, 22x under
+the line).
+
+### Board boot kit
+`sim/sw/bootrom/yboot.py`: waits for the loader's 'Y', sends a frame (or
+frames an SDRAM .hex on the fly, entry 0x8000_0000 by default), reports
+'K'/'E', then stays on the line as a terminal. Copied to the owner's host
+(`~/yarv-boot/`, with `linux.yl`); the board's UART there is `/dev/ttyUSB1`
+(Sipeed debugger `if01`, FT2232-compatible 0403:6010).
+**Found while preparing it: the loader jumped with a0 = 'K'** (the ack byte
+it had just sent). Linux reads a0 as the boot hart ID and a1 as the DTB
+pointer; `make linux` had never caught it because it boots through
+`bootrom_linux.hex`, which zeroes both. yload now sets a0 = mhartid,
+a1 = 0 (D40). `make linux-flash` boots through the real loader (frame at
+2 MiB in the flash model); `sim_main` gained `UART_RX_WAIT=<string>` so
+typing starts only once the console has printed the prompt, whose time
+depends on the load.
+
+| # | Decision | Reasoning |
+|---|---|---|
+| D38 | Forwarding compare on raw fields, `uses_rs*` last | soc-r1's 17 failing endpoints all sat behind the decoder tree through `rs1_addr_dec`; equivalence asserted in sim |
+| D39 | `impl/linux_soc_process_config.json` mirrors the MCU's, with 50 MHz and init primitives | Without it the IDE defaults to Verilog 2001; the Tcl wrapper sets the same options for CLI runs |
+| D40 | yload jumps with a0 = mhartid, a1 = 0 | RISC-V Linux boot protocol; a1 = 0 selects the built-in DTB |
+| D41 | Load-time figures extrapolated linearly from 4 KiB-256 KiB runs | A 4 MiB UART load is 18 G cycles of simulation; the fits are linear to within a few cycles |
+
+### Board bring-up of the SoC (2026-11-27, evening): the SDRAM read bug
+- `soc-r2` (D38 forwarding fix) **closes 50 MHz: +0.015 ns, 0 failing
+  endpoints** (soc-r1: -0.246). Logic 11 541 / 20 736 (56%), BSRAM 15/46.
+  Limiter unchanged (`head_q -> decoder -> de_q.rs1_data` / `req_pc_q`).
+  Reports in `impl/runs/soc-r2/`. +0.015 is inside the noise.
+- On the board the loader worked (`Y`, 1.8 MB at 115200 in 159 s, `K`), and
+  then **nothing ran from SDRAM**: Linux, memtest and CoreMark all silent.
+  `K` only proves the CRC of the bytes received, not what reached memory.
+- **Diagnosis tool: `sim/sw/sdram_probe`**, a boot ROM that runs from ROM and
+  registers only and prints six SDRAM tests (bypass word, address walk,
+  data walk, cached write + fence.i, bypass write + cached read, code run
+  from SDRAM). Board result: **every read returned the word at A+4**, some
+  bits mid-change; writes were fine.
+- **Cause:** the board clocks the SDRAM with CLKOUTP at 180 degrees
+  (`PSDA_SEL "1000"`); the sim clocked the model in phase. At 180 degrees
+  the device drives each burst word half a cycle earlier, and the
+  controller's posedge capture already saw the next word. **Reproduced in
+  sim** with the new `+SDRAM_CLK180` (model on the inverted clock): the probe
+  fails with the board's exact pattern. A phase sweep on the board: 0
+  degrees reads all-ones (commands not taken), so 180 stays.
+- **Fix (D43):** the controller captures read data on the falling edge of
+  clk and hands it to the posedge pipeline. Works in both phases, latency
+  unchanged. Controller `m6-burst` 4d6fca7, cache `m6-burst` fe1eb3c (pin),
+  cache `make sim` ALL CHECKS PASSED, `make bist` PASS. **Board: the probe
+  passes** (`soc-probe-fix`). `soc-r3` = soc-r2 + the fix, on the host for
+  the Linux run. SoC regress green in phase and with `+SDRAM_CLK180`
+  (`SOC_PLUSARGS=+SDRAM_CLK180 python3 sim/soc/regress.py`).
+- Lesson: **a simulation that clocks every device in phase cannot see a
+  capture-window bug that depends on a board clock phase.** The board top's
+  PLL phases must be modelled (or bounded) in sim.
+
+### M9b: boot from the microSD card (sim done, board pending)
+- `sim/sd_spi_model.sv` (worker): SD card in SPI mode, `+SDCARD`,
+  `+SDINIT`, `+SDSC`, `+SDLOG`, `+SDDELAY`, `+SDNCR`; CRC7 checked on
+  CMD0/CMD8, real CRC16 on data, CMD0/8/55/41/58/59/16/17/18/12/9/10.
+  `sim/sw/soc_sdtest` (SDHC + SDSC) in the SoC regress, mutation-checked
+  (start token, CCS, data CRC, init clock).
+- The sim gained the board's **2-flop MISO synchroniser** (it had none):
+  SPI at clk/4 only works with a 1-cycle card delay, so the loader runs the
+  card at clk/8 (4 core clocks per half period; boots with `+SDDELAY` 1-5).
+- `yload.S` (worker): **SD -> UART**, the SPI-flash source is gone (D42).
+  Init at 390.6 kHz (CMD0, CMD8 + v1 fallback, ACMD41 bounded, CMD58/CCS,
+  CMD16 for SDSC), then CMD18 from **sector 2048**, CMD12. Nibble-table CRC
+  and a pipelined SPI stream: **238 -> 71.5 clk/byte**; the Linux Image
+  loads in 2.63 s (UART: 159 s). ROM 1064 / 2048 bytes. Any SD failure
+  falls back to the UART (`yload_sd_badcrc`: `EYK`).
+- **`make -C sim/soc linux-sd`: PASS** — loader `K` at 131.4 M cycles
+  (2.63 s), `Run /bin/sh` 182.7 M (3.65 s), first prompt 198.5 M (3.97 s);
+  one misaligned trap (the kernel's probe). This is also the first proof
+  in sim of loader -> kernel with the D40 register convention.
+- `top_soc` pins moved to the TF slot in `linux_soc.cst` (CLK 83, CMD 82,
+  DAT0 84, DAT3 81, pull-ups). **Not yet synthesised** (soc-r3 still has
+  the old ROM and header pins). Card prep:
+  `dd if=linux.yl of=/dev/sdX bs=512 seek=2048 conv=fsync`.
+
+### Board kit additions
+`sim/sw/soc_memtest` (8 MiB SDRAM test that prints), the CoreMark SoC frame,
+`yboot.py`; all in `~/yarv-boot/` on the owner's host.
+
+| # | Decision | Reasoning |
+|---|---|---|
+| D42 | The SD card replaces the SPI-flash boot source | Same controller, pins move to the TF slot; the configuration-flash pins (NG-4) are no longer needed |
+| D43 | SDRAM read data captured on negedge clk, 180-degree device clock kept | 0 degrees fails on the board (all-ones); negedge capture sits mid-window at 180 and works in phase too |
+| D44 | `+SDRAM_CLK180` and the 2-flop MISO synchroniser in the SoC sim | Both are board behaviour the sim did not model; each hid a real bug class |
+| D45 | Remote run directories: `soc-rN` = full SoC builds, `soc-probe*` = diagnostics; broken `soc-r1`/`soc-r2` deleted on the host after their reports were copied to `impl/runs/` | Owner request |
+
+### M10 on the board: Linux boots (2026-11-27, owner-run)
+**Owner report: "linux booted!"** on `soc-r3` (soc-r2 + D43 negedge capture,
+UART loader with D40, header SPI pins), loaded with
+`~/yarv-boot/yboot.py linux.yl` over the 115200 UART (~159 s of transfer).
+This is the first Linux shell on the yarv32 silicon. Not yet recorded:
+power-on/`K`-to-prompt time and the 5-consecutive-boot reliability run
+(§6.3), and the SD-card boot (`soc-r4`, M9b), which would cut the load from
+159 s to ~2.6 s.

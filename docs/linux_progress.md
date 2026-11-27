@@ -227,3 +227,83 @@ NG-2 (board CoreMark run of the 14.3.0 image).
 
 Also done this session: Python allowlisted for Bash in
 `.claude/settings.local.json` (gitignored, local only).
+
+---
+
+## Session 2 (2026-11-22 evening → 2026-11-27): parallel workers
+
+Three workers ran in parallel: A on M4 (cache repo), B on M8 (git worktree), and
+C on M10 prep (outside the repo). The main thread did the core side of M7
+and prepared M5.
+
+### M4 — cache resource reduction (worker A, cache repo branch `m4-resource`)
+
+Commits in `src/sub/yarv32-native-caches`: `c63238f` (64-bit data macros,
+a line = four 64-bit beats), `afd50f3` (clean-miss latency probe),
+`14747b9` (constant-index way requests, one mux per skid read), `412e656`
+(TODO Phase 10 findings). `make sim`, `make bist`, `+RAM_GARBAGE`,
+`lint-fpga`, `format-check` all green. No gatesim (no iverilog).
+
+| step | yosys flat logic cells | BSRAM |
+|---|---|---|
+| baseline `8f67d78` | ~34 840 | 36 |
+| `14747b9` | **7 769** | **12** |
+
+**Root cause of the 34.8k:**
+- 256-bit data macros (8 blocks each, and the full line width runs through every mux).
+- More of it came from **dynamically indexed array writes/reads**
+  (`imem_req[fsm_victim_way] = …`, `skid_q[req_sel_q][miss_slot_q]`, seven
+  sites). After sv2v + yosys these become per-bit priority muxes and 556-bit
+  shifters. The pre-mapping mux weight went from 191 731 to 30 696.
+
+**Clean-miss latency (sim, `make bist`, 50 MHz): min 78 / avg 82 / max 90
+core cycles.** This is the M6 baseline; the target is ≤ 20.
+
+**Budget (§6.1, provisional, yosys units): does not fit.**
+- Usable: 20 736 × 0.75 = 15 552.
+- Worker A's core estimate: 12 570. The M8 worker measured the whole
+  Linux-branch top (core + UART16550/CLINT/PLIC/SPI/GPIO, before the cache)
+  at **13 543**, so the measured remainder is ~2.0k, against a cache at 7.8k.
+- Caveat that cuts the other way: yosys builds the register file in
+  flops (the script patches it out of BSRAM; GowinSynthesis maps it to
+  BSRAM). So the yosys core figure is inflated by roughly the 32×32 regfile
+  plus its read muxes (≈ 1k FF and 1–2k LUT [E]). A GowinSynthesis table is
+  the only real answer (NG-1).
+
+| # | Decision | Reasoning |
+|---|---|---|
+| D14 | Keep option **C1** (write-back) at 7.8k cells | Worker A measured C2's lower bound at 7 753 cells and the C3 hack at 9 815 (unreliable). The write policy is not where the logic is: it is in the request machinery (2-slot skids, response queues, uncached-path arbitration, `rr_q[2][128]`), duplicated for I and D. C2/C3 would cost CPI for no area. The §6.2 rule ("first that fits") has no fitting option, so the conservative reading is to keep the option with the best CPI at equal area and keep reducing |
+| D15 | M4 continues as **M4b**: a second reduction pass on the request machinery (I-port skid of 1 if fetch allows, no response queue, round-robin state to LUT-RAM or 1 bit per cache, one uncached path), with the CPU-facing ports frozen so M5 integration can proceed in parallel | The budget is missed even before the margin. Reduction is cheaper now than after M5–M7 build on the controller |
+| D16 | M5 integrates the current `m4-resource` cache. `src/sub/yarv32-native-caches` becomes a submodule pinned to a commit of `m4-resource` | Owner's decision (submodule, pinned). The CPU-facing interface is frozen for M4b, so the pin can move forward without M5 rework |
+
+### M7 core side (main thread) — `f6aa60e`
+`fence.i` is a real flush + refetch. EX_FENCEI holds `fencei_req_o` until
+`fencei_ack_i` (tied 1 in the CPU top until the cache exists). New oracle
+`isa/fencei_ops`; regress-fuzz green. Details are in the commit.
+
+### M5 prep (main thread) — `4c9d02a`
+`src/rtl/utils/dport_32to64.sv` (32-bit LSU → 64-bit native port) +
+`sim/hw/dport_tb`: 1947 checks PASS, and two mutants caught (950 / 1512 errors).
+
+### M8 — standard-compatible peripherals (worker B) — merged `3afeeda`, fix `8a61f1f`
+- New Linux-branch map: UART16550 `0x1000_0000` (`ns16550a`, reg-shift 2,
+  io-width 4, DT `clock-frequency = <50000000>`, DL 27 → 115 741 baud);
+  SPI `0x1000_6000`; GPIO `0x1000_7000`; CLINT `0x1001_0000`/64 KiB
+  (`sifive,clint0`); PLIC `0x1040_0000`/4 MiB (`sifive,plic-1.0.0`, ctx 0 = M,
+  ctx 1 = S `seip_o` unconnected until M11). FFT/I2S/I2C and the MCU
+  CLINT/PLIC/UART are gone from both Linux-branch tops.
+- TBs: `clint_tb` 60, `plic_sifive_tb` 146, `uart16550_tb` 125 checks, all
+  PASS, each with mutants caught. `docs/linux_soc.dts` compiles with dtc.
+- Regress drops five main-only tests on this branch (fft, guitar_tuner,
+  i2c_reg, i2c_scan, i2s): **19/19**. After the merge `fencei_ops` still
+  used the old MSIP address; `8a61f1f` fixes it.
+- Worker decisions recorded in the merge's commits: writable `mtime`,
+  3-bit PLIC priority/threshold (all reset 0), 16550 is 8N1-only (LCR
+  stored, not applied), THRE edge interrupt, sim UART 3.125 MBaud.
+- Open: driver offsets come from the worker's knowledge of the drivers and
+  must be re-checked against the pinned 6.18 source (M10). The yosys
+  whole-top figure is 13 543 cells / 3 132 FF / 16 BSRAM.
+
+### M10 prep (worker C)
+Stopped by an API usage limit during the Buildroot toolchain build in
+`~/yarv-linux/`. It is resumed in this session.

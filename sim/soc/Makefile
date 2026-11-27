@@ -54,6 +54,8 @@ $(SNAP)/.done:
 	mkdir -p $(SNAP)/src/ips/sdram-controller
 	git -C $(CACHE_DIR) archive $(CACHE_REV) | tar -x -C $(SNAP)
 	git -C $(CACHE_DIR)/src/ips/sdram-controller archive $(SDRC_REV) | tar -x -C $(SNAP)/src/ips/sdram-controller
+	python3 qualify_pkg.py $(SNAP)/src/rtl/pkg/yarv32_cache_pkg.sv \
+	    $(SNAP)/src/rtl/native_ram.sv $(SNAP)/src/rtl/cache_cntrl.sv
 	touch $@
 
 $(TOP): $(SNAP)/.done ../sim_main.cpp sim_soc.sv $(filter $(CORE)/%,$(RTL))
@@ -64,3 +66,7 @@ clean:
 	rm -rf obj_soc snap img
 
 .PHONY: build clean
+
+regress: $(TOP)
+	python3 regress.py
+.PHONY: regress

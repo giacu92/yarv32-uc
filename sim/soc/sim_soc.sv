@@ -274,6 +274,21 @@ module sim_top #(
         end
     end
 
+    // +ITRACE: log every I-port and D-port accept / response (debug aid).
+    bit itrace;
+    initial itrace = $test$plusargs("ITRACE");
+    always @(posedge clk_i) begin
+        if (itrace) begin
+            if (imem_req.valid && imem_rsp.ready) $display("%0t I-acc  %08x", $time, imem_req.addr);
+            if (imem_rsp.rvalid && imem_req.rready)
+                $display("%0t I-rsp  %016x", $time, imem_rsp.rdata);
+            if (dmem_req.wvalid && dmem_rsp.wready)
+                $display("%0t D-acc  %08x we=%0d wd=%08x st=%x", $time, dmem_req.addr, dmem_req.we,
+                         dmem_req.wdata, dmem_req.wstrb);
+            if (dmem_rsp.rvalid && dmem_req.rready) $display("%0t D-rsp  %08x", $time, dmem_rsp.rdata);
+        end
+    end
+
     // -----------------------------------------------------------------
     // Architectural D-side shadow, for PROBE (sim_main): every store the
     // CPU's LSU launches to the low 16 KiB is mirrored here, so a marker

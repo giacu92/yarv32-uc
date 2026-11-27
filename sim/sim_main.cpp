@@ -215,7 +215,14 @@ static inline void vdump(VerilatedVcdC* tfp, vluint64_t t) {
 // because the SDRAM model checks tRP / tRCD / tRFC and the 100 us power-up
 // window in real nanoseconds. The BSRAM build never looks at $time.
 #ifdef SOC_BUILD
-#define SOC_TIME_STEP() Verilated::defaultContextp()->timeInc(10)
+// timeInc counts in the design's time PRECISION (1 ps here, from the
+// models' `timescale 1ns/1ps`), so 10 ns is 10 * 10^(-9 - precision) units.
+static uint64_t soc_half_period() {
+    uint64_t u = 10;
+    for (int p = Verilated::defaultContextp()->timeprecision(); p < -9; ++p) u *= 10;
+    return u;
+}
+#define SOC_TIME_STEP() Verilated::defaultContextp()->timeInc(soc_half_period())
 #else
 #define SOC_TIME_STEP() ((void)0)
 #endif

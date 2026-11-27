@@ -32,9 +32,13 @@ for a64, v in words(imem, 64).items():
         if w or True:
             mem[2 * a64 + half] = w
 text_end = max(mem) + 1 if mem else 0
-# trailing zero padding of the I-image is not code
-while text_end and mem.get(text_end - 1, 0) == 0:
+# trailing padding of the I-image is not code: zeros, or the IMEM_PAD_VALUE
+# fill sw_build.mk can append (0x00100073, ebreak)
+PAD = (0x00000000, 0x00100073)
+while text_end and mem.get(text_end - 1, 0) in PAD:
     text_end -= 1
+for a in [a for a in mem if a >= text_end]:
+    del mem[a]
 dm = words(dmem, 32)
 lo_data = min((a for a, v in dm.items() if v), default=None)
 if lo_data is not None and lo_data < text_end:

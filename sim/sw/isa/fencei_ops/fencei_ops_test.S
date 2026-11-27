@@ -67,7 +67,7 @@ tgt4:
     /* ---- 5: pending software interrupt across fence.i ---- */
     li      t0, 0x8                /* mie.MSIE */
     csrw    mie, t0
-    li      t2, 0x10003000         /* MSIP */
+    li      t2, 0x10010000         /* CLINT msip (+0x0), linux-soc map */
     li      t0, 1
     sw      t0, 0(t2)
     csrsi   mstatus, 0x8           /* MIE: the interrupt is taken around here */
@@ -97,7 +97,7 @@ trap_handler:
     li      t4, 0x80000003
     bne     t3, t4, unexpected
     addi    s9, s9, 1
-    li      t4, 0x10003000
+    li      t4, 0x10010000
     sw      zero, 0(t4)            /* clear MSIP */
     mret
 unexpected:

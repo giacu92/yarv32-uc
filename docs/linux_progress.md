@@ -603,3 +603,16 @@ the new `misa`.
 | D27 | The cache figure is the SoC-shaped wrapper counted with `-nowidelut` | The board top prunes the cache and the default count is unstable (worker A) |
 | D28 | Bursts stop at 15 cycles | The remainder is SDRAM protocol; the CoreMark measurement shows the hit path, not the miss, is now what costs |
 | D29 | Formatting applied to whole touched files | `top_module.sv` and `sim_top.sv` were already off-format on the branch; formatting only the edited lines is not possible with Verible |
+
+### M10 on the SoC sim: shell reached (boot 3, after D24 + D25)
+- Same `~/yarv-linux/soc/Image`, `+NOPROBE`, `bootrom_linux.hex`,
+  `UART_BIT_CYCLES=432`, `UART_RX_START=60000000`. `Run /bin/sh as init
+  process` at 0.743 s of kernel time (~37 M cycles at 50 MHz); BusyBox hush
+  prompt; typed `uname -a`, `ls /`, `echo BOOT-OK` all answered. ~5 min of
+  wall time. `/proc` is not mounted under `rdinit=/bin/sh`, so
+  `cat /proc/meminfo` failed: expected, mount it first next time.
+- **Memory torture test** `sim/sw/soc_torture` (SoC only): 30 000 random
+  cached byte/half/word ops over 64 KiB with a shadow, then fence.i +
+  CACHE_BYPASS device reads, then bypass writes read back cached. PASS,
+  9.5 M cycles. Not yet in the SoC regress and not yet mutation-checked.
+- Next steps and owner items: `docs/linux_resume_prompt.md`.

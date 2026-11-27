@@ -427,3 +427,16 @@ the Gowin device configuration. This is unverified; see the
 `ArthurHeymans/tang_20k_spi_flash` reference in the assessment. Then flash
 the frame at offset 0x200000, e.g. with `openFPGALoader --external-flash
 -o 0x200000 frame.bin` (frame from `sim/sw/bootrom/yframe.py`).
+
+### Cache: M4b step C committed, pin moved (2026-11-27)
+- Cache repo `m4-resource`: `3271811` (constant-index skid fill + line-buffer
+  writes, finishing worker A's uncommitted step) and `f6c8fe5` (begin/end so
+  Verible keeps the indentation). Cache `make sim` (also with `+RAM_GARBAGE`)
+  and `make bist` PASS; format-check clean.
+- Pin moved to `f6c8fe5`. SoC regress: 17 passed, 0 failed, 1 skipped.
+- **Push NOT done (NG-3 still open):** this machine has no GitHub
+  credentials. HTTPS has no username/helper, and SSH reports
+  `git@github.com: Permission denied (publickey)` (the local
+  `~/.ssh/id_ed25519` is not registered on GitHub). To push:
+  `git -C src/sub/yarv32-native-caches push -u origin m4-resource`
+  from a machine/account with access.

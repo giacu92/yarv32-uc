@@ -354,3 +354,35 @@ quicksort/amo cosim, CoreMark relinked unified, PnR → NG-1), M6, M7 proper
   3 501 464 B, initramfs built in). It was about to boot it on QEMU with
   8 MiB and icount. NOTES.md / build.sh state is whatever it wrote; verify
   them before relying on them.
+
+### M5 — continued (2026-11-27, after the owner said "57%, continue")
+
+- SoC sim builds and runs (`56a594a`): `qualify_pkg.py` resolves the package
+  collision in the build snapshot; `$time` advances in the design precision
+  (the SDRAM model saw ps before), so all runs are free of SDRAM protocol
+  errors.
+- **SoC regress (`make -C sim/soc regress`): 15 passed, 1 failed (amo_ops),
+  1 skipped (ifault: the fault boundary is 16 MiB on the SoC).**
+  `wfi_trap` needed a timer armed relative to `mtime` (`1f6aa62`): absolute
+  400 fired before the program started on the SoC. The BSRAM regress is still 19/19.
+- **Spike cosim on the SoC: quicksort PASS 33 589 retires, amo_stress PASS
+  62 581** (same image, SoC trace vs Spike).
+- Unified link for programs above 8 KiB of text: `sim/soc/link_unified.ld`
+  + `start_unified.S` (sp = 8 MiB) + `elf2sdram.sh`.
+
+**CACHE BUG found by M5: the I-port delivers responses out of order.**
+The native protocol and the fetch stage need strict in-order delivery. With
+`+ITRACE`:
+- `amo_ops`: requests 0x40, 0x48 (same missing line) answered 0x48 first,
+  then 0x40.
+- CoreMark (unified): 3 of 14 820 I responses rotated across a miss, a
+  same-line follower and a hit after a redirect. The core then executes
+  wrong instructions and traps (a misaligned load from a corrupted pointer).
+The core's own latency fuzzer is in-order by construction, so this is not
+a core problem. Reported to worker A as top priority, ahead of M4b. The
+submodule pin moves to its fix.
+
+| # | Decision | Reasoning |
+|---|---|---|
+| D17 | The SoC regress skips `ifault` instead of changing the test | Its expectation (fault above 16 KiB) is a property of the MCU's I-mem. The SoC's 16 MiB boundary is checked by the fetch range logic it shares; a SoC-specific ifault test can come with M9 |
+| D18 | `wfi_trap` arms its timer relative to `mtime` on this branch | An absolute deadline is an assumption about boot time, not about the WFI logic under test |

@@ -107,6 +107,14 @@ package rv32_pkg;
     // 50 MHz at +0.093 ns and ran CoreMark on silicon. See execute_stage.sv.
     localparam int unsigned LSU_LIVE_LOAD = 1;
 
+    // Zilx (custom indexed loads under the standard AMO major opcode). 1 on
+    // `main`, where firmware may use it; 0 on the Linux branch (`linux-soc`),
+    // where no toolchain emits it and the opcode belongs to the A extension.
+    // The encodings do not collide (Zilx funct5 10010 / 11010 are unused by
+    // A, Zabha and Zacas), so this is a scope decision, not a decode
+    // conflict. Decided 2026-11-22 (docs/linux_progress.md).
+    localparam int unsigned ZILX_EN = 0;
+
     // ---------------------------------------------------------------
     // Branch-predictor geometry. One place, because three files have to
     // agree: branch_predictor.sv sizes the PHT/GHR from it, and the
@@ -194,20 +202,47 @@ package rv32_pkg;
     // is unmapped too, so the FFT's 8 KiB window stays 8 KiB aligned. An
     // access to either gets a DECERR from the peri xbar.
     // ---------------------------------------------------------------
+    // ===============================================================
+    // LINUX-BRANCH PERIPHERAL MAP (linux-soc, M8, 2026-11-22). Five
+    // windows, every one at an offset a mainline driver already knows, so
+    // Linux and OpenSBI need no driver of ours:
+    //
+    //   0x1000_0000  4 KiB  UART   axi4_lite_uart16550  "ns16550a",
+    //                                reg-shift 2, reg-io-width 4
+    //   0x1000_6000  4 KiB  SPI    axi4_lite_spi        (boot loader only)
+    //   0x1000_7000  4 KiB  GPIO   axi4_lite_gpio       (debug LEDs)
+    //   0x1001_0000 64 KiB  CLINT  clint                "sifive,clint0"
+    //                                msip +0, mtimecmp +0x4000, mtime +0xBFF8
+    //   0x1040_0000  4 MiB  PLIC   axi4_lite_plic_sifive "sifive,plic-1.0.0"
+    //
+    // Each window is aligned to its own size (CLINT 64 KiB, PLIC 4 MiB), so
+    // a window's offset is simply addr[size-1:0]. Everything else in
+    // 0x1000_0000..0x1FFF_FFFF is unmapped and DECERRs, including
+    // 0x1000_4000 (sw/isa/amo_ops relies on that hole).
+    //
+    // Dropped from this branch per the owner's decision (they stay on
+    // `main`): the MCU CLINT pair (MTIMER @0x1000_1000 + MSIP @0x1000_3000),
+    // the MCU PLIC (@0x1000_8000), I2C, the FFT coprocessor and the I2S
+    // receiver. Their constants below are kept only so the unused source
+    // files still elaborate; no top instantiates them here.
+    // ===============================================================
     localparam logic [XLEN-1:0] UART_BASE = 32'h1000_0000;
     localparam logic [XLEN-1:0] UART_SIZE = 32'h0000_1000;
+    localparam logic [XLEN-1:0] SPI_BASE = 32'h1000_6000;
+    localparam logic [XLEN-1:0] SPI_SIZE = 32'h0000_1000;
+    localparam logic [XLEN-1:0] GPIO_BASE = 32'h1000_7000;
+    localparam logic [XLEN-1:0] GPIO_SIZE = 32'h0000_1000;
+    localparam logic [XLEN-1:0] CLINT_BASE = 32'h1001_0000;
+    localparam logic [XLEN-1:0] CLINT_SIZE = 32'h0001_0000;
+    localparam logic [XLEN-1:0] PLIC_BASE = 32'h1040_0000;
+    localparam logic [XLEN-1:0] PLIC_SIZE = 32'h0040_0000;
+    // --- main-only peripherals, NOT instantiated on linux-soc ---
     localparam logic [XLEN-1:0] MTIMER_BASE = 32'h1000_1000;
     localparam logic [XLEN-1:0] MTIMER_SIZE = 32'h0000_2000;
     localparam logic [XLEN-1:0] MSIP_PERI_ADDR = 32'h1000_3000;
     localparam logic [XLEN-1:0] MSIP_PERI_SIZE = 32'h0000_1000;
     localparam logic [XLEN-1:0] I2C_BASE = 32'h1000_5000;
     localparam logic [XLEN-1:0] I2C_SIZE = 32'h0000_1000;
-    localparam logic [XLEN-1:0] SPI_BASE = 32'h1000_6000;
-    localparam logic [XLEN-1:0] SPI_SIZE = 32'h0000_1000;
-    localparam logic [XLEN-1:0] GPIO_BASE = 32'h1000_7000;
-    localparam logic [XLEN-1:0] GPIO_SIZE = 32'h0000_1000;
-    localparam logic [XLEN-1:0] PLIC_BASE = 32'h1000_8000;
-    localparam logic [XLEN-1:0] PLIC_SIZE = 32'h0000_1000;
     // FFT coprocessor: 8 KiB, the only window in the map that is not 4 KiB.
     // It needs two 4 KiB pages -- CSR at +0x0000, the DATA view of the
     // CPU-owned sample buffer at +0x1000 (1024 complex words) -- and the
@@ -538,8 +573,11 @@ package rv32_pkg;
     localparam logic [XLEN-1:0] MCAUSE_ILLEGAL = 32'h0000_0002;  // illegal instruction
     localparam logic [XLEN-1:0] MCAUSE_BREAKPOINT = 32'h0000_0003;  // ebreak
     localparam logic [XLEN-1:0] MCAUSE_LAD_MIS = 32'h0000_0004;  // load addr misaligned
+    localparam logic [XLEN-1:0] MCAUSE_LAD_ACC = 32'h0000_0005;  // load access fault
     localparam logic [XLEN-1:0] MCAUSE_SAD_MIS = 32'h0000_0006;  // store/AMO addr misaligned
+    localparam logic [XLEN-1:0] MCAUSE_SAD_ACC = 32'h0000_0007;  // store/AMO access fault
     localparam logic [XLEN-1:0] MCAUSE_ECALL_M = 32'h0000_000B;  // env call from M-mode (11)
+    localparam logic [XLEN-1:0] MCAUSE_ECALL_U = 32'h0000_0008;  // env call from U-mode (8)
     localparam logic [XLEN-1:0] MCAUSE_MSI = 32'h8000_0003;  // machine software interrupt
     localparam logic [XLEN-1:0] MCAUSE_MTI = 32'h8000_0007;  // machine timer interrupt
     localparam logic [XLEN-1:0] MCAUSE_MEI = 32'h8000_000B;  // machine external interrupt
@@ -549,8 +587,10 @@ package rv32_pkg;
     localparam int MSTATUS_MPIE_BIT = 7;  // prior MIE (saved on trap entry)
     localparam int MSTATUS_MPP_LO = 11;  // MPP[1:0]: 00=U, 01=S, 11=M
     localparam int MSTATUS_MPP_HI = 12;
-    // Only M-mode is implemented, so MPP is effectively read-only 2'b11.
+    // linux-soc: M and U are implemented (no S), so MPP is WARL {00, 11}.
+    // (On `main` only M exists and MPP is read-only 2'b11.)
     localparam logic [1:0] MSTATUS_MPP_M = 2'b11;
+    localparam logic [1:0] MSTATUS_MPP_U = 2'b00;
     // mstatus reset value: MPP = M, everything else 0 (MIE=0, MPIE=0).
     localparam logic [XLEN-1:0] MSTATUS_RESET = 32'h0000_1800;
 
@@ -559,17 +599,29 @@ package rv32_pkg;
 
 
     typedef enum logic [11:0] {
-        CSR_ADDR_MSTATUS  = 12'h300,
-        CSR_ADDR_MISA     = 12'h301,
-        CSR_ADDR_MIE      = 12'h304,
-        CSR_ADDR_MTVEC    = 12'h305,
-        CSR_ADDR_MSCRATCH = 12'h340,
-        CSR_ADDR_MEPC     = 12'h341,
-        CSR_ADDR_MCAUSE   = 12'h342,
-        CSR_ADDR_MTVAL    = 12'h343,
-        CSR_ADDR_MIP      = 12'h344,
-        CSR_ADDR_MCYCLE   = 12'hB00,
-        CSR_ADDR_MINSTRET = 12'hB02
+        CSR_ADDR_MSTATUS   = 12'h300,
+        CSR_ADDR_MISA      = 12'h301,
+        CSR_ADDR_MIE       = 12'h304,
+        CSR_ADDR_MTVEC     = 12'h305,
+        CSR_ADDR_MSCRATCH  = 12'h340,
+        CSR_ADDR_MEPC      = 12'h341,
+        CSR_ADDR_MCAUSE    = 12'h342,
+        CSR_ADDR_MTVAL     = 12'h343,
+        CSR_ADDR_MIP       = 12'h344,
+        CSR_ADDR_MCYCLE    = 12'hB00,
+        CSR_ADDR_MINSTRET  = 12'hB02,
+        // Upper halves of the 64-bit machine counters (RV32 only).
+        CSR_ADDR_MCYCLEH   = 12'hB80,
+        CSR_ADDR_MINSTRETH = 12'hB82,
+        // Zicntr unprivileged read-only shadows. cycle/instret mirror
+        // mcycle/minstret; time mirrors the CLINT's mtime (clint_timer
+        // mtime_o -> CPU mtime_i), not a counter of its own.
+        CSR_ADDR_CYCLE     = 12'hC00,
+        CSR_ADDR_TIME      = 12'hC01,
+        CSR_ADDR_INSTRET   = 12'hC02,
+        CSR_ADDR_CYCLEH    = 12'hC80,
+        CSR_ADDR_TIMEH     = 12'hC81,
+        CSR_ADDR_INSTRETH  = 12'hC82
     } csr_addr_t;
 
     // D/E pipeline register: everything decode produces for a (future)
@@ -603,6 +655,16 @@ package rv32_pkg;
         mem_size_t mem_size;
         logic mem_unsigned;  // load zero-extend (LBU/LHU)
         logic [1:0] mem_shamt;  // Zilx index scale (0 unscaled, log2 size scaled)
+        // A extension (2026-11-22). At most one of the three is set, and only
+        // together with the mem_read / mem_write that describe the access:
+        //   lr  : mem_read            -- a load that sets the reservation
+        //   sc  : mem_write, rd write -- a store that may be skipped; rd = 0/1
+        //   amo : mem_read+mem_write  -- load phase, then a store phase of
+        //                                amo_funct5(old, rs2); rd = old
+        logic is_lr;
+        logic is_sc;
+        logic is_amo;
+        logic [4:0] amo_funct5;  // instr[31:27], selects the AMO operation
         wb_src_t wb_src;
         branch_t branch_type;
         sys_op_t sys_op;  // OPC_SYSTEM funct3=0 / fence ops

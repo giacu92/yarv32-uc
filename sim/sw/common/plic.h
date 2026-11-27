@@ -2,53 +2,49 @@
 #define PLIC_H
 
 /*
- * Cause/claim layer over the axi4_lite_plic interrupt controller
- * (src/rtl/utils/axi4_lite_plic.sv) at rv32_pkg::PLIC_BASE = 0x1000_8000.
+ * Driver for the sifive,plic-1.0.0-compatible interrupt controller
+ * (src/rtl/utils/axi4_lite_plic_sifive.sv), linux-soc M8, at
+ * rv32_pkg::PLIC_BASE = 0x1040_0000 (4 MiB window). Context 0 = M-mode
+ * (meip); context 1 = S-mode (seip, unused until S-mode exists).
  *
- * Register map (word offsets from the peripheral base):
- *   0x00 PENDING (R)    : bit i = source i pending. THE LINES THEMSELVES,
- *                         combinationally -- every source is a level whose
- *                         edge-ness is latched where it belongs (GPIO
- *                         INT_STATUS, the UART/I2C/SPI conditions), so
- *                         there is no claim-side state.
- *   0x04 ENABLE  (RW)   : bit i = source i enabled into meip. RESETS
- *                         ALL-ONES (meip degenerates to the OR of the
- *                         lines), so pre-PLIC firmware runs unchanged.
- *   0x08 CLAIM   (R)    : lowest-ID enabled pending source. The read is
- *                         SIDE-EFFECT-FREE: "claim = complete" is the
- *                         source's own service mechanism dropping its line
- *                         (e.g. W1C the GPIO INT_STATUS bit, drain the
- *                         UART RX FIFO).
+ *   +0x000000 + 4*id        priority[id] (3 bits; 0 = never interrupts)
+ *   +0x001000               pending bits
+ *   +0x002000 + 0x80*ctx    enable bits
+ *   +0x200000 + 0x1000*ctx  threshold; +4 = claim (read) / complete (write)
  *
- * Source IDs (rv32_pkg::PLIC_SRC_*): 0 reserved ("nothing pending", CLAIM
- * returning 0), 1 UART, 2 I2C, 3 SPI, 4 GPIO, 5 FFT, 6 I2S, 7-15 reserved
- * (tied off).
- * Fixed hardware priority LOWER ID WINS; no per-source priority registers.
+ * Gateway semantics, as the real part: CLAIM returns the highest-priority
+ * eligible source (lowest ID on a tie, 0 = none) and takes it out of
+ * service; it is not presented again until COMPLETE is written with its ID,
+ * even if its line stays high. A COMPLETE for a source not enabled in that
+ * context is ignored (spec). Everything resets to 0: firmware must set a
+ * priority and an enable bit before any source can interrupt -- unlike the
+ * MCU PLIC, whose ENABLE reset to all-ones.
  *
- * THE LIVELOCK CONTRACT (pinned by sim/hw/plic_tb): a source whose line is
- * still high pends again immediately, so CLAIM returns the same ID and the
- * core re-takes the interrupt after mret. An ISR that claims without
- * servicing spins forever -- service the source (drop its line) inside the
- * handler, every time. plic_attach()'s dispatcher claims ONE source per
- * interrupt entry; if several are pending the others re-take after mret,
- * which is correct and costs one entry each.
+ * Source IDs (rv32_pkg::PLIC_SRC_*): 1 UART, 3 SPI, 4 GPIO on this branch
+ * (2 I2C, 5 FFT, 6 I2S are main-only; their IDs are kept so they never get
+ * reused).
  *
  * Depends on sys.h (included): the dispatcher registers itself at the
- * machine-external cause (11) and calls the per-source handler. Call
- * sys_isr_install() once (sys.h), then plic_attach() per source, then
- * sys_irq_source_enable(SYS_MIE_MEIE) + sys_irq_global_enable().
+ * machine-external cause (11), claims one source, calls its handler, and
+ * completes it. Call sys_isr_install() once, then plic_attach() and
+ * plic_enable() per source, then sys_irq_source_enable(SYS_MIE_MEIE) +
+ * sys_irq_global_enable().
  */
 
 #include "sys.h"
 
-#define PLIC_BASE 0x10008000u
+#define PLIC_BASE 0x10400000u
+#define PLIC_CTX  0u  /* hart 0, M-mode */
 
-#define PLIC_PENDING (*(volatile unsigned int *)(PLIC_BASE + 0x00))
-#define PLIC_ENABLE  (*(volatile unsigned int *)(PLIC_BASE + 0x04))
-#define PLIC_CLAIM   (*(volatile unsigned int *)(PLIC_BASE + 0x08))
+#define PLIC_PRIORITY(id) (*(volatile unsigned int *)(PLIC_BASE + 4u * (id)))
+#define PLIC_PENDING      (*(volatile unsigned int *)(PLIC_BASE + 0x1000u))
+#define PLIC_ENABLE       (*(volatile unsigned int *)(PLIC_BASE + 0x2000u + 0x80u * PLIC_CTX))
+#define PLIC_THRESHOLD    (*(volatile unsigned int *)(PLIC_BASE + 0x200000u + 0x1000u * PLIC_CTX))
+#define PLIC_CLAIM        (*(volatile unsigned int *)(PLIC_BASE + 0x200004u + 0x1000u * PLIC_CTX))
+#define PLIC_COMPLETE     PLIC_CLAIM
 
 /* Source IDs -- must match rv32_pkg::PLIC_SRC_* (the single source of
- * truth for the tops' irq_i concatenation). */
+ * truth). */
 #define PLIC_SRC_NONE 0u
 #define PLIC_SRC_UART 1u
 #define PLIC_SRC_I2C  2u
@@ -62,29 +58,37 @@
 /* Source plumbing                                                     */
 /* ------------------------------------------------------------------ */
 
-/* Raw pending picture (the IRQ lines themselves). */
+/* Gateway pending bits (latched; cleared by a claim). */
 static unsigned int plic_pending(void)
 {
     return PLIC_PENDING;
 }
 
-/* Enable / disable a source into meip (mask bit, PLIC_ENABLE). Note the
- * all-ones reset: a source is enabled until explicitly disabled. */
+/* Enable a source into meip: priority 1 (above threshold 0) + enable bit.
+ * This is exactly what Linux's plic_irq_unmask() does. */
 static void plic_enable(unsigned int src)
 {
+    PLIC_THRESHOLD = 0u;
+    PLIC_PRIORITY(src) = 1u;
     PLIC_ENABLE |= (1u << src);
 }
 
 static void plic_disable(unsigned int src)
 {
     PLIC_ENABLE &= ~(1u << src);
+    PLIC_PRIORITY(src) = 0u;
 }
 
-/* Claim: lowest-ID enabled pending source, 0 if none. Side-effect-free
- * (see header) -- completing the interrupt is the source's job. */
+/* Claim: highest-priority eligible source, 0 if none. Takes the source out
+ * of service until plic_complete(). */
 static unsigned int plic_claim(void)
 {
     return PLIC_CLAIM & 0xFFu;
+}
+
+static void plic_complete(unsigned int src)
+{
+    PLIC_COMPLETE = src;
 }
 
 /* ------------------------------------------------------------------ */
@@ -96,12 +100,15 @@ typedef void (*plic_handler_fn)(unsigned int src);
 static plic_handler_fn plic_tab[PLIC_SRC_N];
 
 /* The machine-external dispatcher: claim once, call the registered handler
- * (if any), return. See the LIVELOCK CONTRACT above. */
+ * (if any), complete. The handler must still service its source (drop the
+ * line) -- otherwise the source re-pends right after the complete. */
 static void plic_mei_isr(void)
 {
     unsigned int src = plic_claim();
     if (src != PLIC_SRC_NONE && src < PLIC_SRC_N && plic_tab[src])
         plic_tab[src](src);
+    if (src != PLIC_SRC_NONE)
+        plic_complete(src);
 }
 
 /* Register a handler for a source ID and hook the dispatcher into the

@@ -109,10 +109,21 @@ module rv32imac_zicsr_zifencei #(
     // write — SW clears it by writing mtimecmp > mtime, not by writing mip.
     input wire mtip_i,
 
+    // The CLINT's 64-bit mtime, read back through the time / timeh CSRs.
+    input wire [63:0] mtime_i,
+
     // Machine external-interrupt pending bit from the board-level peripheral
     // IRQ tree (currently the UART's level IRQ). Drives mip.MEIP. Read-only
     // from CSR write — SW clears it by servicing the peripheral.
-    input wire meip_i
+    input wire meip_i,
+
+    // fence.i handshake with the memory system. fencei_req_o is a LEVEL held
+    // from execute's EX_FENCEI until fencei_ack_i (a one-cycle pulse). A top
+    // with BSRAM memories (always coherent) ties the ack to 1, making fence.i
+    // a pipeline flush + refetch; the Linux SoC top wires it to the cache,
+    // which writes back dirty D-lines and invalidates the I-cache first.
+    output wire fencei_req_o,
+    input  wire fencei_ack_i
 );
 
     // ===================================================================
@@ -230,6 +241,7 @@ module rv32imac_zicsr_zifencei #(
     wire [XLEN-1:0] ex_pc;
     wire [XLEN-1:0] ex_instr;
     wire            ex_valid;
+    wire            ex_commit;  // op_commits: this cycle (ex_valid is next cycle)
 
     // ===================================================================
     // Module instantiations
@@ -308,6 +320,10 @@ module rv32imac_zicsr_zifencei #(
     // write commits the RMW result from execute (csr_wdata / csr_we).
     // Both ports address the op currently in execute (single CSR op at a
     // time).
+    // Current privilege (M = 1, U = 0) and its trap-unit update.
+    wire priv_m, priv_we, priv_d;
+    wire wfi_wake;  // WFI resume: mip & mie, not gated by mstatus.MIE
+
     csr_regfile u_csr_regfile (
         .clk_i         (clk_i),
         .rstn_i        (rstn_i),
@@ -326,12 +342,16 @@ module rv32imac_zicsr_zifencei #(
         .msip_i        (msip_i),
         .mtip_i        (mtip_i),
         .meip_i        (meip_i),
+        .mtime_i       (mtime_i),
         .mtvec_o       (csr_mtvec),
         .mepc_o        (csr_mepc),
         .mstatus_o     (csr_mstatus),
         .mip_o         (csr_mip),
         .mie_o         (csr_mie),
-        .instr_retire_i(ex_valid)
+        .instr_retire_i(ex_commit),
+        .priv_we_i     (priv_we),
+        .priv_d_i      (priv_d),
+        .priv_m_o      (priv_m)
     );
 
     // Trap unit (combinational peer of the execute stage): consumes the
@@ -346,6 +366,7 @@ module rv32imac_zicsr_zifencei #(
         .mstatus_i       (csr_mstatus),
         .mip_i           (csr_mip),
         .mie_i           (csr_mie),
+        .priv_m_i        (priv_m),
         .take_trap_i     (sync_trap_req),
         .take_interrupt_i(take_interrupt),
         .mret_i          (mret_req),
@@ -363,7 +384,10 @@ module rv32imac_zicsr_zifencei #(
         .csr_we_mstatus_o(we_mstatus),
         .csr_d_mstatus_o (d_mstatus),
         .int_pending_o   (int_pending),
-        .int_cause_o     (int_cause)
+        .wfi_wake_o      (wfi_wake),
+        .int_cause_o     (int_cause),
+        .priv_we_o       (priv_we),
+        .priv_d_o        (priv_d)
     );
 
     decode_stage #(
@@ -391,6 +415,7 @@ module rv32imac_zicsr_zifencei #(
         .rs2_data_i           (rs2_data),
         .stall_i              (ex_stall),
         .flush_i              (ex_flush),
+        .priv_m_i             (priv_m),
         .ex_wb_en_i           (wb_en),
         .ex_wb_addr_i         (wb_addr),
         .ex_wb_data_i         (wb_data),
@@ -436,6 +461,7 @@ module rv32imac_zicsr_zifencei #(
         // triggers); redirect_addr selects trap / mret / interrupt target
         // over the normal branch.
         .int_pending_i       (int_pending),
+        .wfi_wake_i          (wfi_wake),
         .int_cause_i         (int_cause),
         .trap_redirect_addr_i(trap_redirect_addr),
         .sync_trap_req_o     (sync_trap_req),
@@ -446,7 +472,10 @@ module rv32imac_zicsr_zifencei #(
         .trap_pc_o           (trap_pc),
         .ex_pc_o             (ex_pc),
         .ex_instr_o          (ex_instr),
-        .ex_valid_o          (ex_valid)
+        .ex_valid_o          (ex_valid),
+        .commit_o            (ex_commit),
+        .fencei_req_o        (fencei_req_o),
+        .fencei_ack_i        (fencei_ack_i)
     );
 
     // Branch predictor (gshare PHT + GHR + RAS). Decode queries it for the

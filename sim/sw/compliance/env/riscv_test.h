@@ -136,10 +136,14 @@ _start:                                                                 \
 trap_vector:                                                            \
         /* Only three things can land here: the ecall that RVTEST_PASS / \
            RVTEST_FAIL use to report, a trap the test installed an       \
-           mtvec_handler for, or a genuine failure. There is no U-mode   \
-           or S-mode on this core, so CAUSE_MACHINE_ECALL is the only    \
-           ecall cause that can occur. */                                \
+           mtvec_handler for, or a genuine failure. linux-soc has M and  \
+           U (no S): the rv32u* bodies run in U exactly as upstream's,   \
+           since mret goes to the cleared MPP, so their report ecall is  \
+           CAUSE_USER_ECALL; rv32m* bodies report with                    \
+           CAUSE_MACHINE_ECALL. */                                        \
         csrr t5, mcause;                                                \
+        li t6, CAUSE_USER_ECALL;                                        \
+        beq t5, t6, write_tohost;                                       \
         li t6, CAUSE_MACHINE_ECALL;                                     \
         beq t5, t6, write_tohost;                                       \
         /* if the test defined an mtvec_handler, hand the trap to it */  \
@@ -171,11 +175,10 @@ reset_vector:                                                           \
         init;                                                           \
         EXTRA_INIT;                                                     \
         EXTRA_INIT_TIMER;                                               \
-        /* mret into the test body. mstatus.MPP was just cleared, but    \
-           this core forces MPP=11 on every mstatus write (M-mode only), \
-           so the mret returns to M-mode and not to a mode that does not \
-           exist here. a0 = 0 stands in for mhartid, which this core     \
-           does not implement (it reads 0 anyway). */                    \
+        /* mret into the test body. mstatus.MPP was just cleared, so a   \
+           rv32u* body runs in U (as upstream); RVTEST_RV32M's init sets \
+           MPP back to M first. a0 = 0 stands in for mhartid, which this \
+           core does not implement (it reads 0 anyway). */                \
         la t0, 1f;                                                      \
         csrw mepc, t0;                                                  \
         li a0, 0;                                                       \

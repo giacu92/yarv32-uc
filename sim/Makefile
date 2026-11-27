@@ -27,21 +27,17 @@ RTL := \
 	../src/rtl/core/execute_stage.sv \
 	../src/rtl/core/rv32imac_zicsr_zifencei.sv \
 	../src/rtl/utils/native_ram.sv \
-	../src/rtl/utils/msip_peri.sv \
-	../src/rtl/utils/clint_timer.sv \
-	../src/rtl/utils/axi4_lite_uart.sv \
-	../src/rtl/utils/axi4_lite_i2c.sv \
+	mem_fuzz.sv \
+	../src/rtl/utils/clint.sv \
+	../src/rtl/utils/axi4_lite_uart16550.sv \
 	../src/rtl/utils/axi4_lite_spi.sv \
 	../src/rtl/utils/axi4_lite_gpio.sv \
-	../src/rtl/utils/axi4_lite_plic.sv \
-	../src/rtl/utils/fft_dpram.sv \
-	../src/rtl/utils/fft_twiddle_rom.sv \
-	../src/rtl/utils/axi4_lite_fft.sv \
-	../src/rtl/utils/axi4_lite_i2s.sv \
-	i2c_slave_model.sv \
-	i2s_master_model.sv \
-	i2s_mic_model.sv \
+	../src/rtl/utils/axi4_lite_plic_sifive.sv \
 	sim_top.sv
+# linux-soc (M8): the MCU peripherals msip_peri / clint_timer / axi4_lite_uart /
+# axi4_lite_plic and the main-only I2C / FFT / I2S blocks (with their sim
+# models) are not part of this top. Their standalone TBs under sim/hw still
+# build them from their own source lists.
 
 # Harvard topology: native u_imem (read-only) + u_dmem (byte-strobed) on
 # dedicated CPU ports, AXI only for peripherals (msip_peri + clint_timer
@@ -113,9 +109,14 @@ run: $(TOP)
 # uart_echo is special-cased at the end: it needs UART_RX stimulus, and its
 # pass condition is the "GOOD" its firmware transmits, not a memory word.
 REGRESS_TESTS := \
-	quicksort:quicksort/build:400000:trace:x10=600d \
+	quicksort:quicksort/build:1500000:trace:x10=600d \
 	bp_pred:isa/bp_pred/build:20000:probe@0x2000=600d \
 	mul_ops:isa/mul_ops/build:20000:probe@0x2000=600d \
+	csr_ops:isa/csr_ops/build:20000:probe@0x2000=600d \
+	umode_ops:isa/umode_ops/build:20000:probe@0x2000=600d \
+	amo_ops:isa/amo_ops/build:20000:probe@0x2000=600d \
+	amo_stress:amo_stress/build:400000:trace:x10=600d \
+	fencei_ops:isa/fencei_ops/build:20000:probe@0x2000=600d \
 	div_ops:isa/div_ops/build:20000:probe@0x2000=600d \
 	rvc_scramble:isa/rvc_scramble/build:20000:probe@0x2000=600d \
 	span_target:isa/span_target/build:20000:probe@0x2000=600d \
@@ -125,12 +126,10 @@ REGRESS_TESTS := \
 	wfi_trap:intr/wfi_trap/build:20000:probe@0x2000=600d \
 	timer:intr/timer/build:20000:probe@0x2000=600d \
 	plic_gpio:peri/plic_gpio/build:200000:probe@0x3000=600d \
-	fft:peri/fft/build:200000:probe@0x3000=600d \
-	guitar_tuner:guitar_tuner/build-sim:5000000:probe@0x3000=600d \
-	i2c_reg:peri/i2c_reg/build:1000000:probe@0x3000=600d \
-	spi_loop:peri/spi_loop/build:400000:probe@0x3000=600d \
-	i2c_scan:peri/i2c_scan/build:5000000:probe@0x3000=600d \
-	i2s:peri/i2s/build:400000:probe@0x3000=600d
+	spi_loop:peri/spi_loop/build:400000:probe@0x3000=600d
+# linux-soc (M8): fft, guitar_tuner, i2c_reg, i2c_scan and i2s are NOT run
+# here -- the FFT, I2S and I2C peripherals are main-only and are not in this
+# branch's tops. They stay in `main`'s REGRESS_TESTS.
 
 # ----------------------------------------------------------------------
 # lint — dead wires, unread bits, unused parameters
@@ -169,13 +168,18 @@ lint: $(HEX_PREREQ)
 	    -I../src/rtl/pkg -I../src/rtl/core -I../src/rtl/bus -I../src/rtl/utils \
 	    $(RTL) 2>&1 | grep -vE '^(- V e r|- Verilator:)' || true
 
+# REGRESS_ARGS: extra plusargs for every run (e.g. +MEM_FUZZ=<seed>).
+# REGRESS_CYC_MULT: scales every MAX_CYC bound (fuzzed memories are slower).
+REGRESS_ARGS ?=
+REGRESS_CYC_MULT ?= 1
+
 regress: $(TOP)
 	@fail=0; skip=0; pass=0; \
 	printf '%-15s %-6s %s\n' TEST RESULT DETAIL; \
 	for t in $(REGRESS_TESTS); do \
 	    name=$$(echo "$$t" | cut -d: -f1); \
 	    dir=$$(echo  "$$t" | cut -d: -f2); \
-	    maxc=$$(echo "$$t" | cut -d: -f3); \
+	    maxc=$$(( $$(echo "$$t" | cut -d: -f3) * $(REGRESS_CYC_MULT) )); \
 	    check=$$(echo "$$t" | cut -d: -f4-); \
 	    if [ ! -f "sw/$$dir/imem.hex" ]; then \
 	        printf '%-15s %-6s %s\n' "$$name" SKIP "not built -- run: make -C sw/$${dir%/*}"; \
@@ -189,7 +193,7 @@ regress: $(TOP)
 	               want=$$(echo "$$check" | sed 's/.*=//');; \
 	    esac; \
 	    out=$$(PROBE=$$probe NO_VCD=1 MAX_CYC=$$maxc RTL_TRACE=.regress.trace ./$(TOP) \
-	           +IINIT=sw/$$dir/imem.hex +DINIT=sw/$$dir/dmem.hex 2>&1); \
+	           +IINIT=sw/$$dir/imem.hex +DINIT=sw/$$dir/dmem.hex $(REGRESS_ARGS) 2>&1); \
 	    cyc=$$(echo "$$out" | sed -n 's/^retired [0-9]* instructions in \([0-9]*\) cycles.*/\1/p'); \
 	    bad=; \
 	    echo "$$out" | grep -q 'WFI-HALT FAIL' && bad="WFI-HALT FAIL"; \
@@ -211,9 +215,9 @@ regress: $(TOP)
 	done; \
 	rm -f .regress.trace; \
 	if [ -f sw/peri/uart_echo/build/imem.hex ]; then \
-	    out=$$(UART_RX='abcdefgh' NO_VCD=1 MAX_CYC=400000 ./$(TOP) \
+	    out=$$(UART_RX='abcdefgh' NO_VCD=1 MAX_CYC=$$((400000 * $(REGRESS_CYC_MULT))) ./$(TOP) \
 	           +IINIT=sw/peri/uart_echo/build/imem.hex \
-	           +DINIT=sw/peri/uart_echo/build/dmem.hex 2>&1); \
+	           +DINIT=sw/peri/uart_echo/build/dmem.hex $(REGRESS_ARGS) 2>&1); \
 	    cyc=$$(echo "$$out" | sed -n 's/^retired [0-9]* instructions in \([0-9]*\) cycles.*/\1/p'); \
 	    if tr -d '\n\r' < sim_uart_tx.txt | grep -q 'GOOD$$'; then \
 	        printf '%-15s %-6s %s\n' uart_echo PASS "$$cyc cyc, TX ends GOOD"; pass=$$((pass+1)); \
@@ -223,7 +227,7 @@ regress: $(TOP)
 	else \
 	    printf '%-15s %-6s %s\n' uart_echo SKIP "no build/"; skip=$$((skip+1)); \
 	fi; \
-	out=$$(NO_VCD=1 MAX_CYC=4000 ./$(TOP) 2>&1); \
+	out=$$(NO_VCD=1 MAX_CYC=$$((4000 * $(REGRESS_CYC_MULT))) ./$(TOP) $(REGRESS_ARGS) 2>&1); \
 	if echo "$$out" | grep -q 'WFI-halt check: OK' && echo "$$out" | grep -q 'parked at'; then \
 	    printf '%-15s %-6s %s\n' harvard_oracle PASS "parks clean"; pass=$$((pass+1)); \
 	else \
@@ -231,6 +235,22 @@ regress: $(TOP)
 	fi; \
 	echo; echo "$$pass passed, $$fail failed, $$skip skipped"; \
 	[ $$fail -eq 0 ]
+
+# regress-fuzz: the whole oracle set on variable-latency memories
+# (mem_fuzz.sv), once per seed. Proves the core does not assume 1-cycle
+# BSRAMs -- the M3 acceptance test of the Linux plan.
+# The exit status is make's, captured before the output is trimmed: piping
+# into `tail` would report tail's status and the target could never fail
+# (it did exactly that in its first version, 2026-11-22).
+FUZZ_SEEDS ?= 1 2 3
+FUZZ_CYC_MULT ?= 8
+regress-fuzz: $(TOP)
+	@rc=0; for s in $(FUZZ_SEEDS); do \
+	    echo "== MEM_FUZZ seed $$s"; \
+	    out=$$($(MAKE) --no-print-directory regress REGRESS_ARGS=+MEM_FUZZ=$$s \
+	          REGRESS_CYC_MULT=$(FUZZ_CYC_MULT) 2>&1) || rc=1; \
+	    echo "$$out" | grep -E ' FAIL ' ; echo "$$out" | tail -1; \
+	done; exit $$rc
 
 # ----------------------------------------------------------------------
 # compliance -- the official riscv-tests ISA suite (sw/compliance/)
@@ -269,11 +289,9 @@ regress: $(TOP)
 #                     own .text, i.e. from the I-mem, through a data load.
 #                     Cases 2-5 and 8-30 (every actual RVC encoding) pass.
 #   rv32mi-pmpaddr    No PMP.
-#   rv32mi-instret_overflow  Fails at case 3: mcycleh / minstreth (the upper
-#                     halves RV32 mandates) are not implemented, so a write to
-#                     minstreth neither lands nor suppresses that
-#                     instruction's count. This is the one entry in the list
-#                     that is a genuine gap rather than a design choice.
+# (rv32mi-instret_overflow left this list on 2026-11-22: mcycleh / minstreth
+# are implemented, and minstret now counts in the commit cycle, so a write
+# to either half suppresses the writing instruction's own increment.)
 COMPLIANCE_DIR  := sw/compliance
 COMPLIANCE_MAXC ?= 100000
 
@@ -281,8 +299,7 @@ COMPLIANCE_XFAIL := \
 	rv32ui-fence_i:539 \
 	rv32ui-ma_data:539 \
 	rv32uc-rvc:d \
-	rv32mi-pmpaddr:3 \
-	rv32mi-instret_overflow:7
+	rv32mi-pmpaddr:3
 
 compliance: $(TOP)
 	@builds=$$(ls -d $(COMPLIANCE_DIR)/build/*/ 2>/dev/null); \

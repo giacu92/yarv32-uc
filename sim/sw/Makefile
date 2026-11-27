@@ -10,7 +10,7 @@
 # Each leaf harness has its own Makefile (see common/sw_build.mk for the shared
 # build logic); this just recurses into each subdir.
 
-GROUPS := quicksort coremark dhrystone yarvmon sha256 guitar_tuner isa intr peri
+GROUPS := quicksort amo_stress coremark dhrystone yarvmon sha256 guitar_tuner isa intr peri
 
 .PHONY: all clean $(GROUPS)
 all:

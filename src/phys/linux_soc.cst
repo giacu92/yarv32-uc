@@ -1,0 +1,70 @@
+//
+// Physical constraints -- Linux SoC (top_soc) on the Sipeed Tang Nano 20K
+// Part: GW2AR-LV18QN88C8/I7 (GW2AR-18C, QFN88)
+//
+// Pins are top_module's (src/phys/rv32imac_Zicsr_Zifencei.cst) for every
+// signal the two tops share. The main-only I2C / I2S pads are not ports of
+// top_soc and are left unassigned.
+//
+// EMBEDDED SDRAM: NO ENTRIES, by design. The GW2AR-18's 8 MiB SDRAM is a
+// SIP die, not board wiring; the toolchain connects it automatically to the
+// top-level ports named O_sdram_* / IO_sdram_dq (see top_soc.sv, names
+// copied from the cache repo's fpga_top.sv, whose own .cst -- the
+// board-proven src/sub/yarv32-native-caches/src/phys/yarv32_cache.cst --
+// has no SDRAM entries either). Renaming a port silently disconnects it.
+//
+
+// 25 MHz reference clock from the MS5351M clock generator (CLK0 -> PIN10),
+// plain LVCMOS33 input.
+IO_LOC "clk_i" 10;
+IO_PORT "clk_i" IO_TYPE=LVCMOS33 PULL_MODE=NONE BANK_VCCIO=3.3;
+
+// Board reset button S1. ACTIVE HIGH: released = low = run (PULL_MODE=DOWN).
+IO_LOC "rst_i" 88;
+IO_PORT "rst_i" IO_TYPE=LVCMOS33 PULL_MODE=DOWN BANK_VCCIO=3.3;
+
+// UART - onboard BL616 USB-UART bridge (console + M9 UART boot).
+IO_LOC "uart_txd_o" 69;
+IO_PORT "uart_txd_o" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "uart_rxd_i" 70;
+IO_PORT "uart_rxd_i" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+
+// SPI master -> onboard microSD slot, SPI mode (M9b, D42: the card replaces
+// the configuration-flash boot path and closes NG-4). Pins from the Tang
+// Nano 20K v1.3 schematic, as used by the SDIO controller of commit 5adbe2f:
+// CLK 83, CMD 82 (= MOSI), DAT0 84 (= MISO), DAT3 81 (= CS). DAT1 (85) and
+// DAT2 (80) are unused in SPI mode and left unconstrained. CMD and DAT0 are
+// open-drain/idle-high on the card side -> pull-ups, so an empty slot reads
+// 0xFF (no card -> UART fallback). The loader runs the card at <= 400 kHz
+// during init, then at clk/8: MISO crosses a 2-flop synchroniser in
+// top_soc.sv, which clk/4 cannot absorb (see yload.S).
+IO_LOC "spi_sck_o" 83;
+IO_PORT "spi_sck_o" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "spi_mosi_o" 82;
+IO_PORT "spi_mosi_o" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "spi_miso_i" 84;
+IO_PORT "spi_miso_i" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+IO_LOC "spi_cs_n_o" 81;
+IO_PORT "spi_cs_n_o" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+
+// GPIO (4 bidirectional free right-header pins). PULL_MODE=UP so a released
+// pin reads 1 (the GPIO INT_TYPE resets to level-high: firmware must set an
+// edge type and W1C INT_STATUS before arming).
+IO_LOC "gpio_io[0]" 41;
+IO_PORT "gpio_io[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "gpio_io[1]" 42;
+IO_PORT "gpio_io[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "gpio_io[2]" 71;
+IO_PORT "gpio_io[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "gpio_io[3]" 72;
+IO_PORT "gpio_io[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+
+// Debug LEDs.
+IO_LOC "led_o[3]" 18;
+IO_PORT "led_o[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "led_o[2]" 17;
+IO_PORT "led_o[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "led_o[1]" 16;
+IO_PORT "led_o[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "led_o[0]" 15;
+IO_PORT "led_o[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;

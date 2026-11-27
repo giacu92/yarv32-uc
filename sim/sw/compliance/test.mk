@@ -31,7 +31,7 @@ BUILD   := build/$(SUITE)-$(TEST)
 S_SRCS  := $(TEST).S
 VPATH   := riscv-tests/isa/$(SUITE)
 
-ARCH    := rv32im_zicsr_zifencei
+ARCH    := rv32ima_zicsr_zifencei
 LINK_LD := env/link_harvard.ld
 
 EXTRA_CFLAGS := -Ienv -Iriscv-tests/env -Iriscv-tests/isa/macros/scalar

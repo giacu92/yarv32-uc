@@ -37,12 +37,17 @@
 
 #define TIMER_CYCLES_PER_US (TIMER_CORE_HZ / 1000000u)
 
-/* CLINT machine timer registers (word offsets from MTIMER_BASE). */
-#define TIMER_BASE      0x10001000u
-#define TIMER_MTIME_LO  (*(volatile unsigned int *)(TIMER_BASE + 0x00))
-#define TIMER_MTIME_HI  (*(volatile unsigned int *)(TIMER_BASE + 0x04))
-#define TIMER_MTIMECMP_LO (*(volatile unsigned int *)(TIMER_BASE + 0x08))
-#define TIMER_MTIMECMP_HI (*(volatile unsigned int *)(TIMER_BASE + 0x0C))
+/* CLINT, SiFive layout (linux-soc M8, rtl `clint`): one 64 KiB window at
+ * CLINT_BASE = rv32_pkg::CLINT_BASE. msip +0x0, mtimecmp +0x4000/+0x4004,
+ * mtime +0xBFF8/+0xBFFC -- the offsets Linux's timer-clint and OpenSBI use.
+ * (The MCU's MTIMER @0x1000_1000 + MSIP @0x1000_3000 pair is gone here.) */
+#define CLINT_BASE      0x10010000u
+#define CLINT_MSIP      (*(volatile unsigned int *)(CLINT_BASE + 0x0000))
+#define TIMER_BASE      CLINT_BASE
+#define TIMER_MTIMECMP_LO (*(volatile unsigned int *)(CLINT_BASE + 0x4000))
+#define TIMER_MTIMECMP_HI (*(volatile unsigned int *)(CLINT_BASE + 0x4004))
+#define TIMER_MTIME_LO  (*(volatile unsigned int *)(CLINT_BASE + 0xBFF8))
+#define TIMER_MTIME_HI  (*(volatile unsigned int *)(CLINT_BASE + 0xBFFC))
 
 /* ------------------------------------------------------------------ */
 /* mcycle-based delays                                                 */

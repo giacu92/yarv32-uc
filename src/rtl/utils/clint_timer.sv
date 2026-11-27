@@ -49,7 +49,11 @@ module clint_timer (
 
     axi4_lite_if.slave axi,
 
-    output wire mtip_o
+    output wire mtip_o,
+
+    // The free-running counter itself, for the CPU's time / timeh CSRs
+    // (Zicntr). A wire off mtime_q, so CSR and MMIO read one clock.
+    output wire [63:0] mtime_o
 );
 
     localparam int DATA_W = axi.DATA_WIDTH;
@@ -66,6 +70,8 @@ module clint_timer (
     // =================================================================
     logic [63:0] mtime_q;
     logic [63:0] mtimecmp_q;
+
+    assign mtime_o = mtime_q;
 
     always_ff @(posedge clk_i) begin
         if (!rstn_i) begin

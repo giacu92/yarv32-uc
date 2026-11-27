@@ -77,7 +77,8 @@ import rv32_pkg::*;
  *
  * Opcodes that decode to illegal=1 (execute raises the illegal-instruction
  * trap): real atomics and RV64-only Zilx encodings under OPC_AMO, reserved
- * funct3 values, sfence.vma (no VM), and any unknown opcode. OPC_MISC_MEM
+ * funct3 values, sfence.vma (no VM), a CSR access to an unimplemented
+ * address or a write to a read-only one, and any unknown opcode. OPC_MISC_MEM
  * (fence / fence.i) and OPC_SYSTEM funct3=0 (ecall / ebreak / mret / wfi) are
  * decoded and retired -- they ride sys_op to execute.
  *
@@ -149,6 +150,11 @@ module decode_stage #(
     // Back-pressure from execute (DIV/REM stall) and a branch redirect.
     input wire stall_i,
     input wire flush_i,
+
+    // Current privilege, 1 = M, 0 = U (a flop in csr_regfile). Changes only
+    // on trap entry / mret, both of which redirect and flush decode, so the
+    // value seen here always belongs to the instruction being decoded.
+    input wire priv_m_i,
 
     // Execute writeback observation for the forward path: when execute
     // retires a register write this cycle (ex_wb_en_i) to a destination
@@ -586,8 +592,19 @@ module decode_stage #(
     // result is ready, and decode is parked (stall_i) through the whole
     // busy/wait window.
     // =================================================================
-    wire fwd_rs1 = ex_wb_en_i & (ex_wb_addr_i != 5'd0) & (rs1_addr_dec == ex_wb_addr_i);
-    wire fwd_rs2 = ex_wb_en_i & (ex_wb_addr_i != 5'd0) & (rs2_addr_dec == ex_wb_addr_i);
+    //
+    // The address compare uses the RAW instruction fields and the use flags are
+    // ANDed in last. Same function as comparing rs*_addr_dec (= uses ? field :
+    // 0, and x0 never forwards), but the 5-bit compare and its carry chain no
+    // longer wait for uses_rs*, which come out of the bottom of the decoder
+    // case tree. Linux SoC PnR run soc-r1 (2026-11-27): all 17 failing setup
+    // endpoints were de_q.rs1_data, through decoded_valid -> imm -> is_lr ->
+    // wb_src -> rs1_addr -> this comparator, -0.246 ns. The old expression is
+    // kept as an equivalence assertion under `ifdef VERILATOR` below.
+    logic [4:0] rd_field, rs1_field, rs2_field;  // decoder fields, declared before use
+    logic uses_rs1, uses_rs2;
+    wire fwd_rs1 = ex_wb_en_i & (ex_wb_addr_i != 5'd0) & (rs1_field == ex_wb_addr_i) & uses_rs1;
+    wire fwd_rs2 = ex_wb_en_i & (ex_wb_addr_i != 5'd0) & (rs2_field == ex_wb_addr_i) & uses_rs2;
 
     wire [XLEN-1:0] rs1_fwd = fwd_rs1 ? ex_wb_data_i : rs1_data_i;
     wire [XLEN-1:0] rs2_fwd = fwd_rs2 ? ex_wb_data_i : rs2_data_i;
@@ -652,6 +669,28 @@ module decode_stage #(
     logic [4:0] rs2_addr_dec;
     logic [11:0] csr_addr_dec;
 
+    // CSR addresses this core implements (csr_regfile.sv), plus the
+    // mandatory machine information registers, which read 0 here:
+    // mvendorid / marchid / mimpid / mhartid / mconfigptr (0xF11..0xF15)
+    // and RV32's mstatush (0x310, no MBE/SBE/MPV fields on this core).
+    // tselect / tdata1..3 (0x7A0..0x7A3) also read 0 and ignore writes: that
+    // is the Sdtrig answer "no trigger at this index" (tdata1.type = 0), the
+    // form upstream riscv-tests (rv32mi-breakpoint) and OpenSBI's trigger
+    // probe expect, rather than a trap. Anything else traps as an illegal
+    // instruction.
+    function automatic logic csr_addr_known(input logic [11:0] a);
+        unique case (a)
+            CSR_ADDR_MSTATUS, CSR_ADDR_MISA, CSR_ADDR_MIE, CSR_ADDR_MTVEC, CSR_ADDR_MSCRATCH,
+                CSR_ADDR_MEPC, CSR_ADDR_MCAUSE, CSR_ADDR_MTVAL, CSR_ADDR_MIP, CSR_ADDR_MCYCLE,
+                CSR_ADDR_MINSTRET, CSR_ADDR_MCYCLEH, CSR_ADDR_MINSTRETH, CSR_ADDR_CYCLE,
+                CSR_ADDR_TIME, CSR_ADDR_INSTRET, CSR_ADDR_CYCLEH, CSR_ADDR_TIMEH, CSR_ADDR_INSTRETH,
+                12'h306, 12'h310, 12'hF11, 12'hF12, 12'hF13, 12'hF14, 12'hF15, 12'h7A0, 12'h7A1,
+                12'h7A2, 12'h7A3:
+            return 1'b1;
+            default: return 1'b0;
+        endcase
+    endfunction
+
     // ---- Field extraction ----
     logic [6:0] opcode;
     logic [2:0] funct3;
@@ -660,20 +699,18 @@ module decode_stage #(
     logic funct7b5;  // funct7[5] — SUB/SRA, M-ext
     logic [11:0] funct12;
     logic aq, rl;  // AMO ordering bits (instr[26:25]) — must be 0 for Zilx
-    logic [4:0] rd_field, rs1_field, rs2_field;
     logic is_m_ext;
 
     // ---- Immediates (sign-extended) ----
     logic [31:0] imm_i, imm_s, imm_b, imm_u, imm_j;
 
     // ---- Decoded control (defaults; recognised opcodes override) ----
-    logic [31:0] imm;
-    logic uses_rs1, uses_rs2;
-    logic       reg_write;
-    logic       csr_wren;
-    alu_op_t    alu_op;
-    alu_src_a_t alu_src_a;
-    alu_src_b_t alu_src_b;
+    logic       [31:0] imm;
+    logic              reg_write;
+    logic              csr_wren;
+    alu_op_t           alu_op;
+    alu_src_a_t        alu_src_a;
+    alu_src_b_t        alu_src_b;
     logic mem_read, mem_write;
     mem_size_t            mem_size;
     logic                 mem_unsigned;
@@ -736,6 +773,8 @@ module decode_stage #(
     logic is_unscaled, is_scaled;
     logic size_ok_rv32;
     logic zilx_ok;
+    // A extension decode (2026-11-22): which of LR / SC / AMO this is.
+    logic is_lr, is_sc, is_amo;
 
     always_comb begin
         // ---- Source selection ----
@@ -890,8 +929,11 @@ module decode_stage #(
         exc_tval = '0;
         // Zilx helpers: assigned here so every opcode path drives them (no
         // latch). Only OPC_AMO below reads/overrides zilx_ok.
-        is_unscaled = (funct5 == 5'b10010);  // lx  (unscaled)
-        is_scaled = (funct5 == 5'b11010);  // lxs (scaled)
+        is_unscaled = (ZILX_EN != 0) && (funct5 == 5'b10010);  // lx  (unscaled)
+        is_scaled = (ZILX_EN != 0) && (funct5 == 5'b11010);  // lxs (scaled)
+        is_lr = 1'b0;
+        is_sc = 1'b0;
+        is_amo = 1'b0;
         size_ok_rv32 = (funct3 inside {3'b000, 3'b001, 3'b010, 3'b100, 3'b101});
         zilx_ok = 1'b0;
 
@@ -1168,6 +1210,38 @@ module decode_stage #(
                 end
                 // else: funct5=11110 (RV64) or real AMO -> illegal.
 
+                // A extension, RV32: funct3 = 010 (.W) only. aq/rl are
+                // accepted and need nothing: one hart, in-order, every access
+                // already globally ordered. LR.W needs rs2 = 0.
+                if (funct3 == 3'b010) begin
+                    unique case (funct5)
+                        5'b00010: is_lr = (rs2_field == 5'd0);  // LR.W
+                        5'b00011: is_sc = 1'b1;  // SC.W
+                        5'b00001, 5'b00000, 5'b00100, 5'b01100, 5'b01000, 5'b10000, 5'b10100,
+                            5'b11000, 5'b11100:
+                        is_amo = 1'b1;  // AMOSWAP/ADD/XOR/AND/OR/MIN/MAX/MINU/MAXU
+                        default: ;
+                    endcase
+                end
+                if (is_lr || is_sc || is_amo) begin
+                    // EA = rs1 (+ 0): the ALU computes it as an ADD with a
+                    // zero immediate, so the EA tap and alu_result agree
+                    // exactly as for a plain load (asserted in execute).
+                    dec_illegal  = 1'b0;
+                    reg_write    = 1'b1;  // rd <- old value (LR/AMO) or 0/1 (SC)
+                    mem_read     = is_lr | is_amo;
+                    mem_write    = is_sc | is_amo;
+                    mem_size     = MS_W;
+                    mem_unsigned = 1'b0;
+                    alu_op       = ALU_ADD;
+                    alu_src_a    = ALU_A_RS1;
+                    alu_src_b    = ALU_B_IMM;
+                    imm          = 32'd0;
+                    uses_rs1     = 1'b1;
+                    uses_rs2     = is_sc | is_amo;  // store data / AMO operand
+                    wb_src       = WB_MEM;
+                end
+
                 if (zilx_ok) begin
                     dec_illegal = 1'b0;
                     reg_write   = 1'b1;
@@ -1239,6 +1313,27 @@ module decode_stage #(
                         end
                         default: dec_illegal = 1'b1;  // unreachable (is_csr => funct3!=0)
                     endcase
+                    // Illegal-CSR trap (2026-11-22). An address this core
+                    // does not implement, or a WRITE to a read-only address
+                    // (csr[11:10] == 2'b11), is an illegal instruction rather
+                    // than a silent read-0 / write-ignore. Software probes
+                    // features this way (OpenSBI emulates rdtime and detects
+                    // PMP/trigger CSRs from the trap), so a silent 0 lies.
+                    // CSRRS/CSRRC with rs1 = x0 and their immediate forms with
+                    // zimm = 0 do not write (priv. spec), so they may read a
+                    // read-only CSR. The address set is decoded from the
+                    // instruction word only (funct12, funct3, rs1 field), so
+                    // it is a flop-to-flop term into de_d.illegal / exception,
+                    // never on the operand or forwarding path.
+                    // U-mode (linux-soc): every CSR is illegal. All the
+                    // M CSRs need M (csr[9:8] = 11), and mcounteren is
+                    // read-only zero, so cycle/time/instret are not
+                    // delegated to U either.
+                    if (!csr_addr_known(
+                            funct12
+                        ) || (funct12[11:10] == 2'b11 &&
+                              (funct3[1:0] == 2'b01 || rs1_field != 5'd0)) || !priv_m_i)
+                        dec_illegal = 1'b1;
                 end else begin
                     // Trap-entry / return / halt ops (funct3 == 0). Retire
                     // with side effects handled in execute (redirect + CSR
@@ -1246,11 +1341,11 @@ module decode_stage #(
                     // ebreak raise a sync trap (exc_req=1) the cycle they
                     // retire; mret/wfi are legal no-side-eff at decode.
                     // SFENCE.VMA (no VM) stays illegal -> traps as illegal.
-                    if (funct12 == 12'h000) begin  // ECALL -> env call from M-mode
+                    if (funct12 == 12'h000) begin  // ECALL -> env call from M or U
                         sys_op      = SYS_ECALL;
                         dec_illegal = 1'b0;
                         exc_req     = 1'b1;
-                        exc_cause   = MCAUSE_ECALL_M;
+                        exc_cause   = priv_m_i ? MCAUSE_ECALL_M : MCAUSE_ECALL_U;
                         exc_tval    = '0;
                     end else if (funct12 == 12'h001) begin  // EBREAK -> breakpoint
                         sys_op      = SYS_EBREAK;
@@ -1260,12 +1355,15 @@ module decode_stage #(
                         exc_tval    = '0;
                     end else if (funct7 == 7'b0001000 && rs2_field == 5'b00101 &&
                                  rs1_field == 5'b00000) begin  // WFI
-                        sys_op      = SYS_WFI;
-                        dec_illegal = 1'b0;
+                        // In U-mode WFI is illegal: with no S-mode the spec
+                        // only allows it in U if it completes in bounded
+                        // time, and here it halts until an interrupt.
+                        sys_op      = priv_m_i ? SYS_WFI : SYS_NONE;
+                        dec_illegal = !priv_m_i;
                     end else if (funct7 == 7'b0011000 && rs2_field == 5'b00010 &&
                                  rs1_field == 5'b00000) begin  // MRET
-                        sys_op      = SYS_MRET;
-                        dec_illegal = 1'b0;
+                        sys_op      = priv_m_i ? SYS_MRET : SYS_NONE;
+                        dec_illegal = !priv_m_i;  // mret needs M
                     end else if (funct7 == 7'b0001001) begin  // SFENCE.VMA -> illegal (no VM)
                         dec_illegal = 1'b1;
                     end else begin
@@ -1540,7 +1638,11 @@ module decode_stage #(
         // reg_write / mem_read / mem_write / csr_wren are squashed by
         // illegal. A spanning stitch decodes a real 32-bit instr through
         // the uniform decoder, so spanning no longer forces illegal.
+        de_d.amo_funct5      = funct5;
         if (dec_illegal) begin
+            de_d.is_lr       = 1'b0;
+            de_d.is_sc       = 1'b0;
+            de_d.is_amo      = 1'b0;
             de_d.reg_write   = 1'b0;
             de_d.mem_read    = 1'b0;
             de_d.mem_write   = 1'b0;
@@ -1548,6 +1650,9 @@ module decode_stage #(
             de_d.branch_type = BR_NONE;
             de_d.illegal     = decoded_valid;  // illegal=1 only when a word was present
         end else begin
+            de_d.is_lr     = is_lr;
+            de_d.is_sc     = is_sc;
+            de_d.is_amo    = is_amo;
             de_d.reg_write = reg_write;
             de_d.mem_read  = mem_read;
             de_d.mem_write = mem_write;
@@ -1735,6 +1840,14 @@ module decode_stage #(
     end
 
 `ifdef VERILATOR
+    // Forwarding-compare rewrite (soc-r1): must equal the original form.
+    always_ff @(posedge clk_i) begin
+        if (fwd_rs1 != (ex_wb_en_i & (ex_wb_addr_i != 5'd0) & (rs1_addr_dec == ex_wb_addr_i)))
+            $fatal(1, "decode: fwd_rs1 rewrite diverges from rs1_addr_dec compare");
+        if (fwd_rs2 != (ex_wb_en_i & (ex_wb_addr_i != 5'd0) & (rs2_addr_dec == ex_wb_addr_i)))
+            $fatal(1, "decode: fwd_rs2 rewrite diverges from rs2_addr_dec compare");
+    end
+
     // =================================================================
     // Predictor fast-path equivalence (simulation only)
     //

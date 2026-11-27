@@ -272,7 +272,14 @@ module fetch_stage #(
     localparam int BUF_DEPTH = 8;
 
     logic [XLEN-1:0] pc_q, pc_d;  // next fetch address
-    logic [XLEN-1:0] req_pc_q, req_pc_d;  // address of the in-flight read
+    // In-flight read addresses, a depth-2 FIFO in arrival order:
+    //   req_pc_q  = the OLDEST outstanding read (the one the next response
+    //               belongs to) -- every response-side consumer reads this;
+    //   req_pc2_q = the younger one, valid only while inflight_q == 2.
+    // (Until 2026-11-22 there was only req_pc_q, which was sound only because
+    // a 1-cycle BSRAM never leaves two reads outstanding; a cache does.)
+    logic [XLEN-1:0] req_pc_q, req_pc_d;
+    logic [XLEN-1:0] req_pc2_q, req_pc2_d;
     logic [1:0] inflight_q, inflight_d;  // outstanding reads (0..2)
     logic [1:0] stale_q, stale_d;  // in-flight reads owed by the killed path
     logic redir_launched_q, redir_launched_d;  // redirect cycle already issued at the target
@@ -298,7 +305,10 @@ module fetch_stage #(
     // PC outside the implemented I-mem: no bus request, synthesise a fault
     // FIFO entry instead (the memory would alias an out-of-range read back
     // into the image and execute it).
-    wire pc_fault = |pc_q[XLEN-1:IMEM_ADDR_W];
+    // Written as a constant shift rather than a part-select so IMEM_ADDR_W =
+    // XLEN (no fault boundary: the Linux SoC, where 0x8000_0000 aliases SDRAM)
+    // is legal and reduces to 0. For IMEM_ADDR_W < XLEN it is the same wires.
+    wire pc_fault = |(pc_q >> IMEM_ADDR_W);
 
     // Read response accepted this cycle.
     wire rsp_cap = imem_rsp_i.rvalid && imem_req_o.rready;
@@ -412,13 +422,13 @@ module fetch_stage #(
     // decodes IMEM_ADDR_W bits, so its answer is an alias of real
     // instructions: drop it and push one fault entry stamped with the exact
     // faulting PC instead. req_pc_q is a flop, so this check costs nothing.
-    wire rsp_fault = |req_pc_q[XLEN-1:IMEM_ADDR_W];
+    wire rsp_fault = |(req_pc_q >> IMEM_ADDR_W);  // see pc_fault
     wire do_rsp_data = do_rsp && !rsp_fault;  // push instruction words
     wire do_rsp_fault = do_rsp && rsp_fault;  // push one fault entry
     wire rsp_two = ~req_pc_q[2];  // target in low half -> push both words
 
     wire [XLEN-1:0] rsp_low_pc = req_pc_q;
-    wire [XLEN-1:0] rsp_high_pc = (req_pc_q & ~32'h7) + 32'd4;
+    wire [XLEN-1:0] rsp_high_pc = (req_pc_q & ~32'h7) + 32'd4;  // oldest read
     wire [31:0] rsp_low_word = imem_rsp_i.rdata[31:0];
     wire [31:0] rsp_high_word = imem_rsp_i.rdata[63:32];
 
@@ -471,6 +481,7 @@ module fetch_stage #(
         // Defaults: hold.
         pc_d       = pc_q;
         req_pc_d   = req_pc_q;
+        req_pc2_d  = req_pc2_q;
         inflight_d = inflight_q;
         stale_d    = stale_q;
         head_d     = head_q;
@@ -515,9 +526,21 @@ module fetch_stage #(
         if (launch) inflight_d = inflight_d + 2'd1;
         if (rsp_cap) inflight_d = inflight_d - 2'd1;
 
-        // The in-flight read address, wherever the launch came from. On a
-        // redirect cycle issue_addr is the target; otherwise it is pc_q.
-        if (launch) req_pc_d = issue_addr;
+        // The in-flight read addresses, wherever the launch came from (on a
+        // redirect cycle issue_addr is the target; otherwise pc_q). FIFO of
+        // depth 2: a response pops the oldest, a launch appends. issue_addr
+        // is the LAST 2:1 into req_pc_q -- the shift term rides on flops
+        // (rsp_cap, inflight_q) -- because req_pc_q/D is an endpoint of the
+        // frozen run's worst path.
+        //   occupancy after the pop = inflight_q - rsp_cap
+        //   0 -> the launch becomes the oldest   (req_pc_q)
+        //   1 -> the launch becomes the younger  (req_pc2_q)
+        // inflight_q == 2 implies no launch this cycle (bus_issue gate).
+        if (rsp_cap && (inflight_q == 2'd2)) req_pc_d = req_pc2_q;
+        if (launch) begin
+            if (inflight_q == {1'b0, rsp_cap}) req_pc_d = issue_addr;
+            else req_pc2_d = issue_addr;
+        end
 
         // A redirect-cycle launch defers the pc advance to the next cycle.
         // Only an in-cycle launch does that: when the execute redirect is held
@@ -542,6 +565,7 @@ module fetch_stage #(
         if (!rstn_i) begin
             pc_q             <= boot_addr_i;
             req_pc_q         <= '0;
+            req_pc2_q        <= '0;
             inflight_q       <= 2'd0;
             stale_q          <= 2'd0;
             redir_launched_q <= 1'b0;
@@ -551,6 +575,7 @@ module fetch_stage #(
         end else begin
             pc_q             <= pc_d;
             req_pc_q         <= req_pc_d;
+            req_pc2_q        <= req_pc2_d;
             inflight_q       <= inflight_d;
             stale_q          <= stale_d;
             redir_launched_q <= redir_launched_d;
@@ -610,28 +635,22 @@ module fetch_stage #(
         assert (BUF_DEPTH == 8)
         else $fatal(1, "BUF_DEPTH width assumptions broken");
 
-    // req_pc_q is ONE register while inflight_q is allowed to reach 2, so
-    // the split PC stamp is only correct while a launch never overwrites the
-    // address of a read whose response has not landed yet. That holds on a
-    // 1-cycle BSRAM (see the req_pc_q paragraph in the header) and it is an
-    // assumption about the slave, not something this module enforces -- a
-    // variable-latency I-mem breaks it, and the failure is silent: the older
-    // response gets split at the younger read's PC, so fe_pc, branch targets
-    // and link addresses go wrong with no error signal anywhere. Measured on
-    // the BSRAM this never fires (inflight_q stays in {0,1} on the Harvard
-    // oracle, quicksort, bp_pred and CoreMark). Fix if it ever does: a
-    // depth-2 shadow FIFO for req_pc, not a wider register.
+    // In-flight PC FIFO (req_pc_q oldest, req_pc2_q younger), 2026-11-22.
+    // It replaced a single req_pc_q that was only correct while a launch
+    // never overwrote the address of a read whose response had not landed --
+    // true on a 1-cycle BSRAM, false behind a cache. Exercised by the
+    // latency-fuzz memory wrapper (sim/mem_fuzz.sv, +MEM_FUZZ).
     always_ff @(posedge clk_i) begin
         if (rstn_i) begin
-            assert (!(launch && (inflight_q != 2'd0) && !rsp_cap))
+            // The in-flight PC FIFO has two slots: a launch with two reads
+            // already outstanding (and none retiring) would drop an address.
+            assert (!(launch && (inflight_q == 2'd2) && !rsp_cap))
             else
                 $fatal(
                     1,
-                    "fetch: req_pc_q overwritten with a response still owed (inflight=%0d, issue=%08h, req_pc_q=%08h)"
-                        ,
+                    "fetch: in-flight PC FIFO overflow (inflight=%0d, issue=%08h)",
                     inflight_q,
-                    issue_addr,
-                    req_pc_q
+                    issue_addr
                 );
 
             // Buffer-room invariant: reserved = count + 2*inflight <= 8.

@@ -70,7 +70,14 @@
 // follows it ever ran.
 // Must match sim_top's u_dmem ADDR_W (14 -> 16 KiB -> 4096 words).
 #define DMEM_WORDS 4096u
+#ifdef SOC_BUILD
+// Linux SoC sim (sim/soc): there is no D-mem array; PROBE reads the
+// architectural shadow sim_soc keeps of every CPU store to the low 16 KiB,
+// so a marker still dirty in the D-cache reads correctly.
+#define DMEM_WORD(w) (top->rootp->sim_top__DOT__probe_shadow[(w)])
+#else
 #define DMEM_WORD(w) (top->rootp->sim_top__DOT__u_dmem__DOT__mem[(w)])
+#endif
 
 // Taps inside the decode and fetch stages. Note the instance names differ:
 // the CPU top instantiates decode as u_decode but fetch as fetch_stage_i.
@@ -109,7 +116,7 @@ public:
     // (UART_BIT_CYCLES env, paired with -GUART_CLK_HZ / -GUART_BAUD).
     static int bit_cycles() {
         const char *e = getenv("UART_BIT_CYCLES");
-        return e ? atoi(e) : 5;
+        return e ? atoi(e) : 16;  // linux-soc 16550: 16 x DL clocks, DL = 1
     }
     static const int GAP_CYCLES = 10;  // idle-high clocks between frames
 
@@ -118,8 +125,34 @@ public:
         return e ? atoi(e) != 0 : true;
     }
 
+    // UART_RX_START=<cycles>: hold the line idle that long before the first
+    // frame, so input meant for a program that only starts listening late
+    // (a kernel's shell) is not shipped while the receiver is still unset.
+    static long start_cycles() {
+        const char *e = getenv("UART_RX_START");
+        return e ? atol(e) : 0;
+    }
+
+    // UART_RX_WAIT=<string> (SoC build): stay idle until the console has
+    // printed <string> (e.g. a shell prompt), THEN count UART_RX_START cycles
+    // and start typing. For input whose listener starts at a time nobody can
+    // predict, e.g. a kernel loaded by the boot loader first.
+    static std::string wait_for() {
+        const char *e = getenv("UART_RX_WAIT");
+        return e ? std::string(e) : std::string();
+    }
+
     explicit UartRxDriver(std::string bytes)
-        : bytes_(std::move(bytes)), bit_cycles_(bit_cycles()), paced_(paced()) {}
+        : bytes_(std::move(bytes)), bit_cycles_(bit_cycles()), paced_(paced()),
+          gap_(start_cycles()), wait_(wait_for()) {}
+
+    // Feed one console TX byte (only matters while waiting).
+    void observe_tx(char c) {
+        if (wait_.empty()) return;
+        tail_.push_back(c);
+        if (tail_.size() > wait_.size()) tail_.erase(0, tail_.size() - wait_.size());
+        if (tail_ == wait_) wait_.clear();
+    }
 
     bool done() const { return idx_ >= (int)bytes_.size() && !active_; }
     int  sent() const { return idx_ - (active_ ? 1 : 0); }
@@ -134,6 +167,7 @@ public:
     // input, so it must be reproducible here.
     int step(bool blocked) {
         if (!active_) {
+            if (!wait_.empty()) return 1;
             if (gap_ > 0) { --gap_; return 1; }
             if (idx_ >= (int)bytes_.size() || (paced_ && blocked)) return 1;
             cur_    = (uint8_t)bytes_[idx_++];
@@ -161,7 +195,9 @@ private:
     uint8_t     cur_    = 0;
     int         bit_    = 0;
     int         cnt_    = 0;
-    int         gap_    = 0;
+    long        gap_    = 0;
+    std::string wait_;
+    std::string tail_;
 };
 
 // Decode C-style escapes in the UART_RX env string so a shell can pass
@@ -204,10 +240,28 @@ static inline void vdump(VerilatedVcdC* tfp, vluint64_t t) {
 
 // One full clock period: low half then high half, dumping the waveform
 // at each step. Outputs are sampled after the rising edge.
+// SoC build: advance Verilator's $time by 10 ns per half period (50 MHz),
+// because the SDRAM model checks tRP / tRCD / tRFC and the 100 us power-up
+// window in real nanoseconds. The BSRAM build never looks at $time.
+#ifdef SOC_BUILD
+// timeInc counts in the design's time PRECISION (1 ps here, from the
+// models' `timescale 1ns/1ps`), so 10 ns is 10 * 10^(-9 - precision) units.
+static uint64_t soc_half_period() {
+    uint64_t u = 10;
+    for (int p = Verilated::defaultContextp()->timeprecision(); p < -9; ++p) u *= 10;
+    return u;
+}
+#define SOC_TIME_STEP() Verilated::defaultContextp()->timeInc(soc_half_period())
+#else
+#define SOC_TIME_STEP() ((void)0)
+#endif
+
 static void tick(Vsim_top* top, VerilatedVcdC* tfp) {
+    SOC_TIME_STEP();
     top->clk_i = 0;
     top->eval();
     vdump(tfp, sim_time++);
+    SOC_TIME_STEP();
     top->clk_i = 1;
     top->eval();
     vdump(tfp, sim_time++);
@@ -422,11 +476,16 @@ int main(int argc, char** argv) {
     int cyc;
     for (cyc = 0; cyc < max_cyc; ++cyc) {
         // UART RX line level for this clock period, paced off the RX FIFO.
+#ifdef SOC_BUILD
+        if (UTAP(tx_push)) rx_drv.observe_tx((char)(UTAP(wdata_eff) & 0xff));
+#endif
         top->uart_rxd_i = rx_drv.step(UTAP(rx_fifo_full) != 0);
 
         // Low half: de_q holds the op about to retire at this edge; sample
         // its writeback before the edge commits it (wb is combinational
         // from de_q, so the pre-edge value lines up with this retire).
+        SOC_TIME_STEP();
+
         top->clk_i = 0;
         top->eval();
         vdump(tfp, sim_time++);
@@ -522,6 +581,8 @@ int main(int argc, char** argv) {
 
         // High half: the posedge commits the writeback and updates the
         // stage registers. fe/de/ex valid are sampled post-edge.
+        SOC_TIME_STEP();
+
         top->clk_i = 1;
         top->eval();
         vdump(tfp, sim_time++);

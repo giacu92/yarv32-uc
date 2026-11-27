@@ -43,13 +43,13 @@ import rv32_pkg::*;
 *   DIRECT   (00) -> all traps/interrupts to BASE = {mtvec[31:2],2'b00}.
 *   VECTORED (01) -> interrupts to BASE + 4*code; sync exceptions to BASE.
 *
-* mstatus machine-mode field semantics (RV32, only M-mode implemented):
-*   trap entry (sync OR interrupt): MPIE<=MIE, MIE<=0, MPP<=11 (M).
-*   mret: MIE<=MPIE, MPIE<=1, MPP<=11 (M).
+* mstatus field semantics (RV32, linux-soc: M and U implemented, no S):
+*   trap entry (sync OR interrupt): MPIE<=MIE, MIE<=0, MPP<=current mode,
+*     mode<=M.
+*   mret: MIE<=MPIE, MPIE<=1, mode<=MPP, MPP<=00 (U).
 *
-* MPP encoding is 2'b00=U, 2'b01=S, 2'b11=M. Only M-mode exists here, so MPP
-* is effectively read-only 2'b11: a trap from M-mode records M, and mret
-* returns to M.
+* MPP encoding is 2'b00=U, 2'b01=S, 2'b11=M; csr_regfile keeps it WARL
+* {00, 11}. The current mode is one flop in csr_regfile (priv_m).
 *
 * Naming: ports *_i/_o; internals no prefix.
 */
@@ -61,6 +61,9 @@ module trap_unit (
     input wire [XLEN-1:0] mstatus_i,
     input wire [XLEN-1:0] mip_i,
     input wire [XLEN-1:0] mie_i,
+
+    // Current privilege, 1 = M, 0 = U (linux-soc has no S).
+    input wire priv_m_i,
 
     // Triggers, resolved by execute (mutually exclusive this cycle).
     input wire take_trap_i,       // sync exception entry
@@ -96,7 +99,18 @@ module trap_unit (
     // Resolved interrupt cause (MEI > MSI > MTI priority, spec order — all
     // three are wired). Execute uses this as the mcause for the interrupt
     // entry.
-    output wire [XLEN-1:0] int_cause_o
+    output wire [XLEN-1:0] int_cause_o,
+
+    // WFI wake: some interrupt is pending AND locally enabled (mip & mie),
+    // whatever mstatus.MIE says. The priv. spec resumes a WFI on exactly
+    // this; the interrupt itself is only TAKEN when int_pending_o is also
+    // set. Linux's idle loop executes wfi with MIE = 0 and re-enables
+    // interrupts afterwards, so gating the wake on MIE hangs it for good.
+    output wire wfi_wake_o,
+
+    // Privilege update: trap entry -> M; mret -> the mode in mstatus.MPP.
+    output wire priv_we_o,
+    output wire priv_d_o
 );
 
     // -----------------------------------------------------------------
@@ -115,7 +129,11 @@ module trap_unit (
     wire mti_pending = mtip_p & mtie_e;
     wire mei_pending = meip_p & meie_e;
 
-    assign int_pending_o = mie_m & (mei_pending | msi_pending | mti_pending);
+    // In U-mode, M-level interrupts are taken whatever mstatus.MIE says
+    // (priv. spec: interrupts for a higher privilege are always globally
+    // enabled while running at a lower one).
+    assign int_pending_o = (mie_m | ~priv_m_i) & (mei_pending | msi_pending | mti_pending);
+    assign wfi_wake_o    = mei_pending | msi_pending | mti_pending;
     assign int_cause_o   = mei_pending ? MCAUSE_MEI : msi_pending ? MCAUSE_MSI : MCAUSE_MTI;
 
     // -----------------------------------------------------------------
@@ -168,15 +186,19 @@ module trap_unit (
         if (entry) begin
             mstatus_new[MSTATUS_MPIE_BIT]              = mstatus_i[MSTATUS_MIE_BIT];
             mstatus_new[MSTATUS_MIE_BIT]               = 1'b0;
-            mstatus_new[MSTATUS_MPP_HI:MSTATUS_MPP_LO] = MSTATUS_MPP_M;
+            mstatus_new[MSTATUS_MPP_HI:MSTATUS_MPP_LO] = priv_m_i ? MSTATUS_MPP_M : MSTATUS_MPP_U;
         end else if (mret_i) begin
             mstatus_new[MSTATUS_MIE_BIT]               = mstatus_i[MSTATUS_MPIE_BIT];
             mstatus_new[MSTATUS_MPIE_BIT]              = 1'b1;
-            mstatus_new[MSTATUS_MPP_HI:MSTATUS_MPP_LO] = MSTATUS_MPP_M;
+            // MPP <- least-privileged supported mode (U).
+            mstatus_new[MSTATUS_MPP_HI:MSTATUS_MPP_LO] = MSTATUS_MPP_U;
         end
     end
 
     assign csr_d_mstatus_o = mstatus_new;
+
+    assign priv_we_o       = entry | mret_i;
+    assign priv_d_o        = entry | (mstatus_i[MSTATUS_MPP_HI:MSTATUS_MPP_LO] == MSTATUS_MPP_M);
 
 endmodule
 

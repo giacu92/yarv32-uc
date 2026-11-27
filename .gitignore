@@ -70,3 +70,6 @@ sim/cosim/amo_stress/spike.log
 sim/cosim/amo_stress/rtl.trace
 sim/cosim/amo_stress/rtl.stdout
 sim/sw/coremark/build-*/
+sim/soc/obj_soc/
+sim/soc/snap/
+sim/soc/img/

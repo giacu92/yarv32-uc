@@ -70,7 +70,14 @@
 // follows it ever ran.
 // Must match sim_top's u_dmem ADDR_W (14 -> 16 KiB -> 4096 words).
 #define DMEM_WORDS 4096u
+#ifdef SOC_BUILD
+// Linux SoC sim (sim/soc): there is no D-mem array; PROBE reads the
+// architectural shadow sim_soc keeps of every CPU store to the low 16 KiB,
+// so a marker still dirty in the D-cache reads correctly.
+#define DMEM_WORD(w) (top->rootp->sim_top__DOT__probe_shadow[(w)])
+#else
 #define DMEM_WORD(w) (top->rootp->sim_top__DOT__u_dmem__DOT__mem[(w)])
+#endif
 
 // Taps inside the decode and fetch stages. Note the instance names differ:
 // the CPU top instantiates decode as u_decode but fetch as fetch_stage_i.
@@ -204,10 +211,21 @@ static inline void vdump(VerilatedVcdC* tfp, vluint64_t t) {
 
 // One full clock period: low half then high half, dumping the waveform
 // at each step. Outputs are sampled after the rising edge.
+// SoC build: advance Verilator's $time by 10 ns per half period (50 MHz),
+// because the SDRAM model checks tRP / tRCD / tRFC and the 100 us power-up
+// window in real nanoseconds. The BSRAM build never looks at $time.
+#ifdef SOC_BUILD
+#define SOC_TIME_STEP() Verilated::defaultContextp()->timeInc(10)
+#else
+#define SOC_TIME_STEP() ((void)0)
+#endif
+
 static void tick(Vsim_top* top, VerilatedVcdC* tfp) {
+    SOC_TIME_STEP();
     top->clk_i = 0;
     top->eval();
     vdump(tfp, sim_time++);
+    SOC_TIME_STEP();
     top->clk_i = 1;
     top->eval();
     vdump(tfp, sim_time++);
@@ -427,6 +445,8 @@ int main(int argc, char** argv) {
         // Low half: de_q holds the op about to retire at this edge; sample
         // its writeback before the edge commits it (wb is combinational
         // from de_q, so the pre-edge value lines up with this retire).
+        SOC_TIME_STEP();
+
         top->clk_i = 0;
         top->eval();
         vdump(tfp, sim_time++);
@@ -522,6 +542,8 @@ int main(int argc, char** argv) {
 
         // High half: the posedge commits the writeback and updates the
         // stage registers. fe/de/ex valid are sampled post-edge.
+        SOC_TIME_STEP();
+
         top->clk_i = 1;
         top->eval();
         vdump(tfp, sim_time++);

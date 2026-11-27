@@ -307,3 +307,39 @@ core cycles.** This is the M6 baseline; the target is ≤ 20.
 ### M10 prep (worker C)
 Stopped by an API usage limit during the Buildroot toolchain build in
 `~/yarv-linux/`. It is resumed in this session.
+
+### M5 — Linux SoC sim, IN PROGRESS (stopped 2026-11-27 at the owner's request: session limit)
+
+Done:
+- `src/sub/yarv32-native-caches` is a submodule pinned to `m4-resource`
+  `412e656` (`0b6d83c`). **NG-3: that commit is local-only; push the cache
+  repo's `m4-resource` branch before anyone clones.**
+- `sim/soc/` scaffolding (WIP commit): `sim_soc.sv` (sim_top with the BSRAMs
+  replaced by `dport_32to64` + `cache_cntrl` + sdram controller +
+  `sdram_model`, CPU `IMEM_ADDR_W=24`, boot at the bootrom 0x80_0000, a
+  CPU-store shadow for PROBE), `mkimage.py` (merges imem.hex + dmem.hex into
+  one SDRAM image, refuses overlap), `bootrom_jump0.hex`, and a Makefile that
+  builds the cache from the PINNED commit (`git archive`), not the submodule
+  working tree. `sim_main.cpp` gains `-DSOC_BUILD`: PROBE reads the shadow, and
+  `$time` advances 10 ns per half period, because the SDRAM model checks real
+  ns. The main BSRAM sim is unchanged (regress 19/19).
+
+**Blocker hit, with the fix to apply next:** both projects wildcard-import
+their package at FILE scope (`import rv32_pkg::*;` / `import
+yarv32_cache_pkg::*;`). Verilator compiles everything into one `$unit`, so
+the cache's `mem_req_t` resolves to `rv32_pkg`'s (`Member 'valid' not found
+in structure`). Fix (next step): in the Makefile's snapshot step, rewrite
+the snapshot copies of the cache files to use package-qualified types
+(`yarv32_cache_pkg::mem_req_t` etc.) and drop their file-scope import.
+The submodule itself is not edited.
+
+Workers at stop time:
+- A: M4b (request-machinery reduction), then M6 (SDRAM bursts, target ≤ 20
+  cycles from the measured 78/82/90), in the cache repo.
+- C: resumed M10 prep (Buildroot nommu 6.18 build in `~/yarv-linux/`, plus
+  checking the CLINT/PLIC/8250 offsets against the 6.18 sources).
+Both may finish after this log entry; their results go in the next session.
+
+Remaining in order: finish M5 (fix above, then regress on the SoC,
+quicksort/amo cosim, CoreMark relinked unified, PnR → NG-1), M6, M7 proper
+(cache clean+invalidate ack), M9 (loader on 16550 + SPI flash), M10, §6.3 review.
